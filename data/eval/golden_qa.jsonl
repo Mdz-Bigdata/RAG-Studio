@@ -1,0 +1,15 @@
+{"question": "年假可以跨年使用吗", "relevant_sources": ["员工手册_2026版.md"], "answer_keywords": ["次年 3 月 31 日"], "category": "常见问题"}
+{"question": "请年假的流程是什么", "relevant_sources": ["员工手册_2026版.md"], "answer_keywords": ["提前 3 个工作日"], "category": "常见问题"}
+{"question": "出差住宿标准能不能超额", "relevant_sources": ["员工手册_2026版.md"], "answer_keywords": ["上浮 20%"], "category": "常见问题"}
+{"question": "P6 出差坐高铁能买什么座", "relevant_sources": ["员工手册_2026版.md"], "answer_keywords": ["一等座"], "category": "精确编号"}
+{"question": "那啥，我想问一下，咱们公司那个每个月光租办公室的钱报销政策是什么来着", "relevant_sources": ["员工手册_2026版.md"], "answer_keywords": ["1500 元"], "category": "口语化"}
+{"question": "远程员工的通讯补贴和本地通勤员工的交通补贴有什么不同", "relevant_sources": ["员工手册_2026版.md"], "answer_keywords": ["200 元通讯补贴", "300 元交通补贴"], "category": "多跳"}
+{"question": "K8s Ingress 502 怎么排查", "relevant_sources": ["K8s运维手册.md"], "answer_keywords": ["upstream 健康检查"], "category": "精确编号"}
+{"question": "MySQL 1062 主键冲突有几种处理方案", "relevant_sources": ["K8s运维手册.md"], "answer_keywords": ["ON DUPLICATE KEY"], "category": "精确编号"}
+{"question": "CVE-2024-3094 怎么修复", "relevant_sources": ["K8s运维手册.md"], "answer_keywords": ["降级 xz"], "category": "精确编号"}
+{"question": "怎么退货", "relevant_sources": ["售后政策.md"], "answer_keywords": ["申请售后"], "category": "常见问题"}
+{"question": "订单 SO-8817 的状态", "relevant_sources": ["售后政策.md"], "answer_keywords": ["SO-8817 因商品运输破损"], "category": "精确编号"}
+{"question": "无理由退货运费退不退", "relevant_sources": ["售后政策.md"], "answer_keywords": ["不予退还"], "category": "长尾"}
+{"question": "M4 Pro 芯片的机型多少钱", "relevant_sources": ["产品价格表.csv"], "answer_keywords": ["15999"], "category": "精确编号"}
+{"question": "P95 延迟告警阈值是多少", "relevant_sources": ["K8s运维手册.md"], "answer_keywords": ["500ms"], "category": "长尾"}
+{"question": "公司食堂几点开饭", "category": "无答案", "expected_refusal": true}

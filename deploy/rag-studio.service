@@ -1,0 +1,25 @@
+# 由 deploy/server.sh 安装到 /etc/systemd/system/rag-studio.service（@ROOT@ 替换为项目目录）
+[Unit]
+Description=RAG Agent Studio (FastAPI backend serving the built frontend)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ragstudio
+Group=ragstudio
+WorkingDirectory=@ROOT@
+EnvironmentFile=-@ROOT@/.env
+# 模型权重放在项目目录下；国内网络走镜像；4G 内存放不下本地重排模型，强制不加载
+Environment=HF_HOME=@ROOT@/.cache/huggingface
+Environment=HF_ENDPOINT=https://hf-mirror.com
+Environment=HF_HUB_DISABLE_XET=1
+Environment=RAG_DISABLE_LOCAL_RERANKER=1
+Environment=TOKENIZERS_PARALLELISM=false
+Environment=OMP_NUM_THREADS=2
+ExecStart=@ROOT@/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,290 @@
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+  font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  color-scheme: dark;
+  
+  /* 主色彩体系 - 科技暗黑与炫彩微光 */
+  --bg-main: #060913;
+  --bg-sidebar: #0b0f19;
+  --bg-glass: rgba(13, 20, 38, 0.6);
+  --bg-glass-active: rgba(22, 33, 62, 0.85);
+  
+  --border-light: rgba(255, 255, 255, 0.08);
+  --border-active: rgba(0, 210, 255, 0.3);
+  
+  --text-primary: #f3f4f6;
+  --text-secondary: #9ca3af;
+  --text-muted: #6b7280;
+  
+  --brand-blue: #00d2ff;
+  --brand-purple: #7928ca;
+  --brand-gradient: linear-gradient(135deg, #00d2ff 0%, #7928ca 100%);
+  
+  /* 检索来源专属颜色 */
+  --color-dense: #00d2ff;
+  --color-bm25: #ff9900;
+  --color-hyde: #a855f7;
+  --color-rrf: #10b981;
+  --color-weaved: #ec4899;
+  
+  --shadow-glow: 0 8px 32px 0 rgba(0, 210, 255, 0.08);
+  --transition-smooth: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--bg-main);
+  color: var(--text-primary);
+  min-height: 100vh;
+  overflow-x: hidden;
+  background-image: 
+    radial-gradient(circle at 10% 20%, rgba(121, 40, 202, 0.08) 0%, transparent 40%),
+    radial-gradient(circle at 90% 80%, rgba(0, 210, 255, 0.06) 0%, transparent 40%);
+  background-attachment: fixed;
+}
+
+/* 隐藏 Vite 默认样式，使用我们自建的高端极简滚动条 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* 玻璃态通用卡片 */
+.glass-panel {
+  background: var(--bg-glass);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border-light);
+  border-radius: 16px;
+  box-shadow: var(--shadow-glow);
+  transition: var(--transition-smooth);
+}
+
+.glass-panel:hover {
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+/* 渐变标题 */
+.gradient-text {
+  background: var(--brand-gradient);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  font-weight: 700;
+}
+
+/* 呼吸灯效果 */
+.pulse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  position: relative;
+}
+
+.pulse-dot.processing {
+  background-color: var(--brand-blue);
+  box-shadow: 0 0 0 0 rgba(0, 210, 255, 0.7);
+  animation: pulse-blue 1.5s infinite;
+}
+
+.pulse-dot.completed {
+  background-color: #10b981;
+}
+
+.pulse-dot.failed {
+  background-color: #ef4444;
+}
+
+.pulse-dot.pending {
+  background-color: #f59e0b;
+}
+
+@keyframes pulse-blue {
+  0% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(0, 210, 255, 0.7);
+  }
+  70% {
+    transform: scale(1);
+    box-shadow: 0 0 0 8px rgba(0, 210, 255, 0);
+  }
+  100% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(0, 210, 255, 0);
+  }
+}
+
+/* 自适应动画 */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.4s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+/* 输入框与按钮样式 */
+input, textarea, select {
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  color: var(--text-primary);
+  padding: 10px 14px;
+  font-family: inherit;
+  font-size: 14px;
+  transition: var(--transition-smooth);
+  outline: none;
+}
+
+input:focus, textarea:focus, select:focus {
+  border-color: var(--brand-blue);
+  box-shadow: 0 0 0 2px rgba(0, 210, 255, 0.15);
+  background: rgba(0, 0, 0, 0.4);
+}
+
+button {
+  cursor: pointer;
+  border: none;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  transition: var(--transition-smooth);
+}
+
+button.primary {
+  background: var(--brand-gradient);
+  color: white;
+  border-radius: 8px;
+  padding: 10px 18px;
+  box-shadow: 0 4px 12px rgba(121, 40, 202, 0.25);
+}
+
+button.primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(121, 40, 202, 0.35);
+}
+
+button.secondary {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-primary);
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  padding: 10px 18px;
+}
+
+button.secondary:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+/* Markdown 文档样式渲染 */
+.markdown-body {
+  font-size: 15px;
+  line-height: 1.7;
+  color: #d1d5db;
+}
+
+.markdown-body p {
+  margin-bottom: 12px;
+}
+
+.markdown-body h1, .markdown-body h2, .markdown-body h3 {
+  color: var(--text-primary);
+  margin-top: 20px;
+  margin-bottom: 12px;
+  font-weight: 600;
+}
+
+.markdown-body h2 {
+  border-bottom: 1px solid var(--border-light);
+  padding-bottom: 6px;
+}
+
+.markdown-body blockquote {
+  border-left: 4px solid var(--brand-blue);
+  background: rgba(0, 210, 255, 0.03);
+  padding: 10px 16px;
+  margin: 14px 0;
+  border-radius: 0 8px 8px 0;
+}
+
+.markdown-body table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 16px 0;
+  font-size: 13px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border-light);
+}
+
+.markdown-body th {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-primary);
+  font-weight: 600;
+  text-align: left;
+}
+
+.markdown-body td, .markdown-body th {
+  padding: 8px 12px;
+  border: 1px solid var(--border-light);
+}
+
+.markdown-body tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+/* 高亮专有名词定义实体 */
+.markdown-body strong {
+  color: var(--brand-blue);
+  font-weight: 600;
+}
+
+/* 语音输入声波状态与动画 */
+.voice-bar {
+  width: 3px;
+  height: 100%;
+  background: var(--brand-blue);
+  border-radius: 2px;
+  animation: voiceWave 0.8s ease-in-out infinite alternate;
+}
+
+@keyframes voiceWave {
+  0% { height: 4px; opacity: 0.3; }
+  100% { height: 16px; opacity: 1; }
+}
+
+@keyframes pulse {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.15); }
+  100% { transform: scale(1); }
+}
+
+.recording-mic-active {
+  background: rgba(239, 68, 68, 0.1) !important;
+  border: 1px solid rgba(239, 68, 68, 0.2) !important;
+  animation: pulse 1.2s infinite ease-in-out;
+}

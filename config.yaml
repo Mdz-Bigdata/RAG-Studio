@@ -1,0 +1,239 @@
+# RAG Agent Studio 策略基线。字段含义见 prism/config.py，方法论见 docs/RAG_OPTIMIZATION_SUMMARY.md。
+# - Web：可在前端"策略配置"页覆盖（覆盖值保存在 SQLite，不改本文件）；
+# - CLI：`rag ingest / query / ask / eval` 直接读取本文件。
+# 调优优先级：切片 → 混合检索 → 重排 → Query 改写；每次只改一个变量并跑一次评测，指标不动就不合入。
+
+paths:
+  data_dir: data
+  index_dir: data/index           # CLI 单库索引；Web 应用每个知识库一个目录 data/indexes/<kb_id>
+  mineru_out_dir: data/mineru_out
+  popo_dir: data/popo
+  upload_dir: data/uploads
+  lancedb_dir: data/lancedb       # 全局 LanceDB：长期记忆 / 推荐 / 多智能体黑板 / 多模态表 / 知识库镜像
+
+# ---------------------------------------------------------------- 解析
+parsing:
+  mineru:
+    enabled: true             # 未安装 mineru 时自动用 pdfplumber / python-docx / python-pptx 兜底
+    tier: flash               # flash（最快，数字文档建索引）| basic（CPU 可跑 OCR/公式/表格）| standard（小模型 + VLM）| advanced
+    ocr_mode: auto            # auto | txt | ocr
+    image_analysis: true      # 图片 / 图表由 VLM 生成描述文字后再切片
+    page_range: ""            # 仅 PDF；"1-5,r3-r1"
+    api_url: null             # 填 http://127.0.0.1:8000 则连接 `mineru-kit api-server`，否则用本地 SDK
+    save_outputs: true        # 落盘 markdown / content_list / middle_json，供复用与 MinerU-Popo
+  popo:
+    enabled: false            # 跑完 MinerU-Popo（scripts/run_popo.sh）后打开：用文档树替换页面级结构
+    repo_dir: null
+    model_path: models/MinerU-Popo
+    backend: transformers     # transformers | vllm
+    use_tree_hierarchy: true
+  markdown_first: true        # .md 永远走 Markdown 解析器（必做）
+
+# ---------------------------------------------------------------- 清洗
+cleaning:
+  drop_headers_footers: true
+  header_footer_min_page_ratio: 0.4   # 同一行出现在 ≥40% 页面 → 页眉 / 页脚
+  fix_pdf_linebreaks: true
+  dedup_near_duplicates: true
+  dedup_jaccard_threshold: 0.9
+  garbled_ratio_threshold: 0.3
+
+# ---------------------------------------------------------------- 切片
+chunking:
+  strategy: structural        # structural（标题 / 段落，默认）| semantic（相邻句向量距离断点）| recursive
+  parent_max_tokens: 600      # 阅读粒度：500-800 token（中文 300-500 字）
+  parent_min_tokens: 120
+  child_tokens: 150           # 检索粒度：100-150 token
+  child_overlap_ratio: 0.12   # 10%-15%
+  respect_atomic_blocks: true # 表格 / 代码 / 公式不拆
+  table_row_split_tokens: 800 # 超长表格按行拆，每块重复表头
+  semantic_breakpoint_percentile: 80
+
+enrich:
+  contextual_summary: false   # Contextual Retrieval：索引阶段每块一次 LLM 调用
+  hypothetical_questions: false   # 假设性问题（QA 对索引，"反向 HyDE"）
+  questions_per_chunk: 3
+
+# ---------------------------------------------------------------- 索引
+embedding:
+  provider: sentence_transformers   # hash | sentence_transformers | openai_compatible
+                                    # 需要 sentence-transformers（rag-agent-studio[models]），没装时自动回退哈希向量；模型配置中心激活的 embedding 优先
+                                    # 换模型后服务会自动后台重建受影响的知识库（索引里记录了构建时用的向量模型）
+  model: BAAI/bge-m3
+  batch_size: 32
+  normalize: true
+  query_instruction: ""
+
+vector_store:
+  backend: numpy              # numpy（零依赖，万级以内）| lancedb（嵌入式：向量 + 全文 + 版本，pip install lancedb）| qdrant | chroma
+                              # 改成 lancedb 后服务自动用 LanceDB 重建所有知识库；不想切换也可以在「LanceDB」页把知识库镜像进去体验
+  qdrant_url: null
+  qdrant_path: null
+  lancedb:                    # 建索引期参数（改了会重建）；查询期的 nprobes / refine_factor / ef_search 在 vector_store.search
+    index_type: auto          # auto（行数 ≥ index_min_rows 自动建 IVF_HNSW_SQ）| none | IVF_HNSW_SQ | IVF_PQ | IVF_FLAT
+    index_min_rows: 20000     # 之下精确扫描：召回 100%，万级数据本来就够快
+    fts_tokenizer: icu        # 原生全文索引分词：icu 自带中文分词、无需下载模型
+    optimize_every: 20        # 每 N 次写入 optimize 一次（合并小文件 + 新数据并入索引）
+    keep_versions_days: 7     # 时间旅行能回看多少天的旧版本
+
+sparse:
+  k1: 1.5                     # 长文档可调到 2.0
+  b: 0.75                     # 文档长度均匀可调到 0.5
+  use_jieba: true
+  user_dict: null             # 领域词典路径
+  exact_token_boost: 0.0      # >0：对含精确 token（编号 / 错误码）的块加分兜底
+
+# ---------------------------------------------------------------- 检索（漏斗：50 → 50 → 10 → 5）
+retrieval:
+  top_n_per_route: 50         # 每路召回 recall_top_k，50-100
+  parallel_recall: true       # 多路召回并发执行，耗时不叠加
+  sparse_backend: bm25        # 关键词路：bm25（bm25s + jieba）| lancedb_fts（LanceDB 原生全文，需 lancedb 向量后端）
+  sql:                        # 混合检索第三路：Excel / CSV → SQLite 表，按字段过滤 / 比较 / 排序
+    enabled: true             # 库里没有表格数据时自动不出现
+    text_to_sql: true         # 有 LLM 用 text-to-SQL（只读 SELECT），否则规则兜底
+    top_n: 20
+    weight: 1.0
+  fusion:
+    method: rrf               # rrf（只看排名，零调参）| convex（min-max 后加权，需评估集调 α）
+    rrf_k: 60
+    weight_dense: 1.0
+    weight_sparse: 1.0        # 金融 / 法律 / IT 文档可适当调高
+    convex_alpha: 0.5
+  rerank:
+    enabled: true
+    provider: auto            # auto（api_url → 本地交叉编码器 → LLM → 词法）| cross_encoder | cohere | api | llm | lexical | none
+                              # 模型配置中心里激活的 rerank 配置优先于这里
+    model: BAAI/bge-reranker-v2-m3   # 默认的本地重排模型（torch + transformers 直接加载；首次使用约 2.3GB）
+    auto_download: true       # 权重不在本机时后台下载，下载期间用 LLM / 词法精排顶上；也可以先执行 `rag download-reranker`
+    cohere_model: rerank-v4.0-pro    # provider: cohere 时使用；密钥读 api_key 或环境变量 COHERE_API_KEY
+    api_url: null             # provider: api 的 base URL（Jina / SiliconFlow …）；cohere 留空即 https://api.cohere.com/v2
+    api_key: null
+    candidates: 50            # 传给 Reranker 的候选数，低于 50 效果断崖式下跌
+    keep_n: 10                # rerank_top_n
+    top_k: 5                  # context_top_n（3-5，Lost in the Middle）
+    min_score: null           # 低于则判定库中无答案 → 拒答。阈值随模型而定：bge-reranker-v2-m3 的相关对常在 0.1~0.9、无关对 < 0.01，取 0.02~0.05
+    min_score_ratio: null     # 例如 0.5：分数低于 top-1 × 0.5 的候选不进入上下文（动态 top-K）
+  diversify:
+    enabled: false            # MMR 多样化
+    mmr_lambda: 0.7
+  granularity:
+    return_parents: true      # Small-to-Big：child 命中 → 返回 parent
+    auto_merge_adjacent: true
+    sentence_window: 0
+    max_context_tokens: 3000
+    order: lost_in_the_middle
+  compression:
+    enabled: false
+    mode: rule                # rule | llm
+    ratio: 0.6
+    min_tokens: 120
+  query_transform:
+    rewrite: true             # 口语 → 书面检索表达
+    multi_query: 3            # 0 = 关闭；扩展 N 个角度，原始问题始终保留
+    hyde: true
+    hyde_max_query_chars: 30
+    decompose: true
+    step_back: false
+    keep_original: true
+    skip_hyde_on_precise_tokens: true   # 含编号 / 数字 / 日期时跳过 HyDE（反模式）
+    condense_history: true
+  graph:
+    unweaver_enabled: true    # 实体定义织入（织入块同样经过过期 / 权限过滤）
+    llm_extraction: false
+    max_weaved: 3
+    weave_relevance: true     # 织入块也过一遍精排：与问题的精排分低于门槛就不织入
+    weave_min_score: null     # 织入门槛；null = 沿用 rerank.min_score，两者都没设时不过滤
+  multihop:
+    enabled: false
+    max_hops: 3
+  agentic:
+    enabled: false
+    max_steps: 3
+  router:
+    enabled: false
+    mode: embedding           # embedding | llm
+    top_kbs: 1
+  filter_expired: true        # 按 valid_from / valid_to 过滤过期语料
+  history_intent: true        # 问题明确问旧规定（"2024 版""旧版""去年"）时放行过期语料，资料中标注"已失效"
+  metadata_filter:            # 自查询：从问题里读出年份 / 部门 / 标签 / 文件类型的限定，召回前先缩小文档范围
+    mode: llm                 # off | rule（只认年份和明确作为来源的部门名）| llm（辅助模型在本库已有取值里挑；无模型时退到 rule）
+    fields: [department, tags, year, file_format]
+    include_missing: true     # 识别出的条件不排除没填该属性的文档（标签通常填不全）
+    fallback: true            # 按条件查不到结果时，去掉条件重查一次
+
+# ---------------------------------------------------------------- 多模态（文搜图 / 图搜图 / 图文混合 / 图搜文 / 带图回答）
+multimodal:
+  enabled: true
+  embedding:
+    provider: auto            # auto：已装 torch + transformers → clip；否则 perceptual（离线感知特征：只支持图搜图，文搜图走描述文本）
+                              # clip | api（Jina 兼容多模态 /embeddings）| perceptual；模型配置中心激活的"图文向量"优先
+    model: OFA-Sys/chinese-clip-vit-base-patch16   # 中文用 Chinese-CLIP；原版 CLIP（openai/clip-vit-base-patch32）中文查询效果差
+    batch_size: 16
+  min_image_side: 48          # 图标 / 分隔线不入库
+  max_side: 1280              # 入库图片最长边
+  drop_repeated_pages: 3      # 同一张图出现在 ≥3 页 → logo / 水印，丢弃
+  ocr: auto                   # auto | none | rapidocr | paddleocr | tesseract —— 图中精确文字 / 数值以 OCR 为准
+  vlm_caption: true           # 入库时用多模态模型为每张图生成语义描述（无模型自动跳过；按内容哈希缓存）
+  top_k: 6
+  rrf_k: 60                   # OCR 文本很短、BM25 区分度低时可调到 100
+  weight_clip: 1.0            # 图文向量路
+  weight_desc_dense: 1.0      # 图片描述 · 向量路
+  weight_desc_sparse: 1.0     # 图片描述 · BM25 路
+  lance_table: false          # 把 LanceDB 多模态表（每库一张 mm：图片 + 正文同表）接入线上图文检索：文搜图 / 问答附图多一路
+                              # 表内图片文字全文（ICU 分词），图搜文多一路 CLIP + 图中文字混合检索；保存索引时增量同步。需要 lancedb
+  weight_lance_mm: 1.0        # 多模态表路的 RRF 权重；0 = 只同步表、不参与检索
+  hybrid_alpha: 0.5           # 图文混合的文本权重：score = α·z(text·I) + (1-α)·z(image·I)
+  min_score: null             # 图搜图相似度阈值，例如 0.7
+  neighbor_min_score: null    # 图搜文：相似图片达到该相似度时，其所在段落进入候选；null = 按模型自动（CLIP 0.9 / 离线感知特征 0.7）
+  chat_images: 4              # 一轮回答最多携带的图片
+  chat_attach_images: 2       # 以像素形式交给 VLM 的图片数（其余只给描述文本）
+  chat_clip_margin: 0.065     # 普通提问附图门槛：图文向量相似度超出"中性提示词"基线的幅度（CLIP 余弦挤在窄区间，绝对阈值分不开）
+  chat_term_coverage: 0.5     # 普通提问附图门槛：问题关键词在图片描述中的覆盖率
+  cross_lingual: true         # 中文问英文图表（或反过来）时，用辅助模型把问题译成图片文字的语言再检索一次（每个问题一次调用，有缓存）
+
+# ---------------------------------------------------------------- 生成
+generation:
+  llm:
+    provider: anthropic       # anthropic | openai_compatible | none
+                              # 模型配置中心激活的文本模型优先；无配置且无 ANTHROPIC_API_KEY 时进入离线抽取模式
+    model: claude-opus-5-5
+    effort: medium
+    max_tokens: 4096
+    # openai_compatible 示例（Qwen / DashScope / vLLM / Ollama）：
+    # provider: openai_compatible
+    # model: qwen3.5-plus
+    # base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    # api_key_env: DASHSCOPE_API_KEY
+    aux_model: null           # 查询改写 / HyDE / text-to-SQL / 路由用的快速模型，如 claude-haiku-4-5、deepseek-flash
+                              # 模型配置中心的 OpenAI 兼容配置也生效：须在同一端点的模型列表里，否则沿用回答模型
+    aux_effort: low
+    thinking: auto            # 推理模型（DeepSeek 等）回答前先思考：auto = 只在多跳 / Agentic 模式思考 | on | off；Claude 看 effort
+  cite_sources: true
+  refuse_when_no_context: true
+
+eval:
+  golden_set: data/eval/golden_qa.jsonl
+  ks: [1, 3, 5, 10]
+  ablation: true
+
+# ---------------------------------------------------------------- LanceDB 应用（数据都在 paths.lancedb_dir）
+memory:                       # 长期记忆：按用户记住身份 / 偏好 / 事实，问答时用于个性化（不作为事实依据）
+  enabled: true
+  recall_top_k: 4
+  min_score: 0.35             # 综合分 = 0.7·相似度 + 0.15·新近度 + 0.15·重要度
+  extract: llm                # 回答后在后台抽取记忆：llm（辅助模型）| rule | off
+  dedup_threshold: 0.9        # 与已有记忆余弦相似度 ≥ 该值 → 合并更新，不重复写入
+  half_life_days: 30
+
+recommend:                    # 个性化推荐：兴趣向量 = 交互条目向量的时间衰减加权和（+ 记忆偏好）
+  enabled: true               # 问答里的提问、被引用的章节自动记为交互
+  half_life_days: 14
+  mmr_lambda: 0.7
+  popularity_weight: 0.1
+  exclude_seen: true
+
+agents:                       # 多智能体协作：规划 → 并行研究 → 分析 → 审校（证据不足改写重查）→ 撰稿
+  max_review_rounds: 2
+  research_top_k: 4
+  max_subtasks: 3
+  use_memory: true

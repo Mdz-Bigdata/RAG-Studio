@@ -1,0 +1,36 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+.pytest_cache/
+.DS_Store
+.env
+
+# 前端
+frontend/node_modules/
+frontend/dist/
+
+# 运行时产物
+data/index/
+data/indexes/
+data/uploads/
+data/mineru_out/
+data/popo/
+data/*.db
+*.log
+
+# 本地环境与工具缓存
+.venv.bak/
+.python/
+.cache/
+.mypy_cache/
+.ruff_cache/
+.claude/
+
+# 运行时数据与训练产物
+data/lancedb/
+data/backups/
+data/training/
+data/models/
+data/eval/answer_reports/

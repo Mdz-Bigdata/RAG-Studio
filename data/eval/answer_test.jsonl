@@ -1,0 +1,60 @@
+{"question": "工作满 3 年后每年有几天年假", "kb": "企业知识库（示例）", "category": "事实", "expect": "answer", "facts": [["10天", "十天"]], "forbidden": [], "note": ""}
+{"question": "调休的有效期是多久", "kb": "企业知识库（示例）", "category": "事实", "expect": "answer", "facts": [["6个月", "六个月", "半年"]], "forbidden": [], "note": ""}
+{"question": "连续病假超过几天需要报人力资源部备案", "kb": "企业知识库（示例）", "category": "事实", "expect": "answer", "facts": [["5天", "五天"]], "forbidden": [], "note": ""}
+{"question": "差旅报销单要在出差结束后多久内提交", "kb": "企业知识库（示例）", "category": "事实", "expect": "answer", "facts": [["10个工作日", "十个工作日"]], "forbidden": [], "note": ""}
+{"question": "远程办公员工的通讯补贴每月多少钱", "kb": "企业知识库（示例）", "category": "事实", "expect": "answer", "facts": [["200"]], "forbidden": [], "note": ""}
+{"question": "员工手册和劳动合同约定冲突时以哪个为准", "kb": "企业知识库（示例）", "category": "事实", "expect": "answer", "facts": [["劳动合同"]], "forbidden": [], "note": ""}
+{"question": "退款到银行卡需要多久", "kb": "企业知识库（示例）", "category": "事实", "expect": "answer", "facts": [["1-7个工作日", "1~7个工作日", "1至7个工作日", "1到7个工作日"]], "forbidden": [], "note": ""}
+{"question": "质量问题退货的运费由谁承担", "kb": "企业知识库（示例）", "category": "事实", "expect": "answer", "facts": [["商家"]], "forbidden": [], "note": ""}
+{"question": "iPhone 15 Pro Max 卖多少钱", "kb": "企业知识库（示例）", "category": "事实", "expect": "answer", "facts": [["9999"]], "forbidden": [], "note": ""}
+{"question": "Nginx Ingress 的 proxy-read-timeout 默认是多少", "kb": "企业知识库（示例）", "category": "事实", "expect": "answer", "facts": [["60秒", "60s", "60 秒"]], "forbidden": [], "note": ""}
+{"question": "K8s 里 503 服务不可用一般是什么原因", "kb": "企业知识库（示例）", "category": "事实", "expect": "answer", "facts": [["endpoint"]], "forbidden": [], "note": ""}
+{"question": "MySQL 1062 主键冲突最常用的处理方案是哪个", "kb": "企业知识库（示例）", "category": "事实", "expect": "answer", "facts": [["ONDUPLICATEKEYUPDATE"]], "forbidden": [], "note": ""}
+{"question": "XZ 后门影响 liblzma 的哪些版本", "kb": "企业知识库（示例）", "category": "事实", "expect": "answer", "facts": [["5.6.0"], ["5.6.1"]], "forbidden": [], "note": ""}
+{"question": "CPU 饱和度告警阈值是多少", "kb": "企业知识库（示例）", "category": "事实", "expect": "answer", "facts": [["80%"]], "forbidden": [], "note": ""}
+{"question": "Dry Run 必须展示哪些内容", "kb": "Agent 开发规范", "category": "事实", "expect": "answer", "facts": [["影响范围"], ["风险边界"]], "forbidden": [], "note": ""}
+{"question": "关键路径的降级方案建议至少设计几层", "kb": "Agent 开发规范", "category": "事实", "expect": "answer", "facts": [["三层", "3层"]], "forbidden": [], "note": ""}
+{"question": "Prompt Cache 的结构稳定铁律要求什么内容放在最前面", "kb": "Agent 开发规范", "category": "事实", "expect": "answer", "facts": [["系统提示词"]], "forbidden": [], "note": ""}
+{"question": "第三季度销售额同比增长了多少", "kb": "图表报告（带图问答验证）", "category": "事实", "expect": "answer", "facts": [["15%"]], "forbidden": [], "note": ""}
+{"question": "高端产品线收入占比是多少", "kb": "图表报告（带图问答验证）", "category": "事实", "expect": "answer", "facts": [["36%"]], "forbidden": [], "note": ""}
+{"question": "这门语音助手课程多少钱", "kb": "PDF 解析验证（MinerU）", "category": "事实", "expect": "answer", "facts": [["399"]], "forbidden": [], "note": ""}
+{"question": "课程后端用的什么框架", "kb": "PDF 解析验证（MinerU）", "category": "事实", "expect": "answer", "facts": [["FastAPI"]], "forbidden": [], "note": ""}
+{"question": "我是 P7，出差坐高铁能买一等座吗", "kb": "企业知识库（示例）", "category": "口语化", "expect": "answer", "facts": [["一等座"]], "forbidden": [], "note": ""}
+{"question": "买的东西拆开用过了还能七天无理由退吗", "kb": "企业知识库（示例）", "category": "口语化", "expect": "answer", "facts": [["已使用", "已激活"]], "forbidden": [], "note": ""}
+{"question": "xz 那个后门漏洞咋修", "kb": "企业知识库（示例）", "category": "口语化", "expect": "answer", "facts": [["5.4"]], "forbidden": [], "note": ""}
+{"question": "上个季度哪个区卖得最好", "kb": "图表报告（带图问答验证）", "category": "口语化", "expect": "answer", "facts": [["华东"]], "forbidden": [], "note": ""}
+{"question": "P6 和 P8 出差坐飞机的舱位有什么区别", "kb": "企业知识库（示例）", "category": "多跳", "expect": "answer", "facts": [["经济舱"], ["公务舱"]], "forbidden": [], "note": ""}
+{"question": "年假逾期没休完会折算成工资吗", "kb": "企业知识库（示例）", "category": "多跳", "expect": "answer", "facts": [["不予折算", "不折算", "不会折算"]], "forbidden": [], "note": ""}
+{"question": "从 24Q3 到 25Q3 毛利率累计提升了多少", "kb": "图表报告（带图问答验证）", "category": "多跳", "expect": "answer", "facts": [["7.1"]], "forbidden": [], "note": ""}
+{"question": "铁律里要求哪些内容配置化而不是写死", "kb": "Agent 开发规范", "category": "多跳", "expect": "answer", "facts": [["Prompt"], ["阈值"]], "forbidden": [], "note": ""}
+{"question": "库存最少的是哪款产品", "kb": "企业知识库（示例）", "category": "表格", "expect": "answer", "facts": [["MacBookPro14"], ["18"]], "forbidden": [], "note": ""}
+{"question": "哪些产品用的是 M4 系列芯片", "kb": "企业知识库（示例）", "category": "表格", "expect": "answer", "facts": [["MacBookPro14"], ["iPadPro11"]], "forbidden": [], "note": ""}
+{"question": "P6 出差可以坐高铁商务座，对吧？", "kb": "企业知识库（示例）", "category": "错误前提", "expect": "correct", "facts": [["一等座"]], "forbidden": [], "note": ""}
+{"question": "MacBook Pro 14 用的是 M3 芯片吗？", "kb": "企业知识库（示例）", "category": "错误前提", "expect": "correct", "facts": [["M4Pro"]], "forbidden": [], "note": ""}
+{"question": "远程办公员工每月 300 元的交通补贴怎么申请？", "kb": "企业知识库（示例）", "category": "错误前提", "expect": "correct", "facts": [["不享受", "不能享受", "无法享受", "不享有", "没有交通补贴", "不能申请", "无法申请"]], "forbidden": [], "note": ""}
+{"question": "调休有效期是一年吗？", "kb": "企业知识库（示例）", "category": "错误前提", "expect": "correct", "facts": [["6个月", "六个月", "半年"]], "forbidden": [], "note": ""}
+{"question": "第三季度销售额同比下降了 15%，主要原因是什么？", "kb": "图表报告（带图问答验证）", "category": "错误前提", "expect": "correct", "facts": [["增长"]], "forbidden": [], "note": ""}
+{"question": "产假有多少天", "kb": "企业知识库（示例）", "category": "无答案", "expect": "refuse", "facts": [], "forbidden": [], "note": ""}
+{"question": "出差的餐补标准是多少", "kb": "企业知识库（示例）", "category": "无答案", "expect": "refuse", "facts": [], "forbidden": [], "note": ""}
+{"question": "Ingress 返回 404 怎么排查", "kb": "企业知识库（示例）", "category": "无答案", "expect": "refuse", "facts": [], "forbidden": [], "note": ""}
+{"question": "MySQL 1205 锁等待超时怎么处理", "kb": "企业知识库（示例）", "category": "无答案", "expect": "refuse", "facts": [], "forbidden": [], "note": ""}
+{"question": "加班费怎么计算", "kb": "企业知识库（示例）", "category": "无答案", "expect": "refuse", "facts": [], "forbidden": [], "note": ""}
+{"question": "公司食堂几点开饭", "kb": "企业知识库（示例）", "category": "无答案", "expect": "refuse", "facts": [], "forbidden": [], "note": ""}
+{"question": "海外出差的住宿标准是多少", "kb": "企业知识库（示例）", "category": "无答案", "expect": "refuse", "facts": [], "forbidden": [], "note": "资料只区分一线城市与其他城市，没有海外标准"}
+{"question": "铁律里推荐用哪个向量数据库", "kb": "Agent 开发规范", "category": "无答案", "expect": "refuse", "facts": [], "forbidden": [], "note": ""}
+{"question": "第三季度的净利润是多少", "kb": "图表报告（带图问答验证）", "category": "无答案", "expect": "refuse", "facts": [], "forbidden": [], "note": ""}
+{"question": "买了课程不满意可以退款吗", "kb": "PDF 解析验证（MinerU）", "category": "无答案", "expect": "refuse", "facts": [], "forbidden": [], "note": ""}
+{"question": "MacBook Air 13 多少钱？保修几年？", "kb": "企业知识库（示例）", "category": "部分可答", "expect": "partial", "facts": [["8999"]], "forbidden": [], "note": ""}
+{"question": "P95 延迟告警阈值是多少？P99 呢？", "kb": "企业知识库（示例）", "category": "部分可答", "expect": "partial", "facts": [["500ms", "500毫秒"]], "forbidden": [], "note": ""}
+{"question": "第三季度销售额是多少？利润率目标是多少？", "kb": "图表报告（带图问答验证）", "category": "部分可答", "expect": "partial", "facts": [["1340"]], "forbidden": [], "note": ""}
+{"question": "工作满 2 年的员工每年有几天年假", "kb": "企业知识库（示例）", "category": "条件推理", "expect": "answer", "facts": [["5天", "五天"]], "forbidden": [], "note": ""}
+{"question": "杭州出差住宿每晚标准是多少", "kb": "企业知识库（示例）", "category": "条件推理", "expect": "answer", "facts": [["400"]], "forbidden": [], "note": ""}
+{"question": "成都出差住 450 元一晚，超出的部分怎么处理", "kb": "企业知识库（示例）", "category": "条件推理", "expect": "answer", "facts": [["400"], ["自行承担"]], "forbidden": [], "note": ""}
+{"question": "Ingress 返回 504 一般怎么处理", "kb": "企业知识库（示例）", "category": "条件推理", "expect": "answer", "facts": [["异步", "调大超时", "调大"]], "forbidden": [], "note": ""}
+{"question": "iPhone 15 Pro Max 比 iPhone 14 贵多少钱", "kb": "企业知识库（示例）", "category": "计算", "expect": "answer", "facts": [["4000"]], "forbidden": [], "note": ""}
+{"question": "第三季度华东区销售额比西部区多多少", "kb": "图表报告（带图问答验证）", "category": "计算", "expect": "answer", "facts": [["240"]], "forbidden": [], "note": ""}
+{"question": "实习生可以申请联合办公室租金报销吗", "kb": "企业知识库（示例）", "category": "范围陷阱", "expect": "refuse", "facts": [], "forbidden": [], "note": "资料只说远程办公员工，没提实习生"}
+{"question": "K8s Pod 一直 CrashLoopBackOff 怎么办", "kb": "企业知识库（示例）", "category": "范围陷阱", "expect": "refuse", "facts": [], "forbidden": [], "note": ""}
+{"question": "第三季度华南区销售额环比增长了多少", "kb": "图表报告（带图问答验证）", "category": "范围陷阱", "expect": "refuse", "facts": [], "forbidden": [], "note": "只有 Q3 各区域数据，没有 Q2 区域数据"}
+{"question": "旧版员工手册规定年假要提前几天申请", "kb": "企业知识库（示例）", "category": "历史版本", "expect": "answer", "facts": [["5个工作日", "五个工作日"]], "forbidden": [], "note": ""}
+{"question": "去年没休完的年假今年还能休吗", "kb": "企业知识库（示例）", "category": "历史版本", "expect": "answer", "facts": [["不可跨年", "不能跨年", "不可以跨年", "年底自动清零", "年底清零", "已清零", "不能再休", "不可以再休"]], "forbidden": [], "note": "今天 2026-10；去年（2025）适用 2024 版：不可跨年，年底清零", "start_forbidden": ["^能", "^可以", "^还能", "^是的"]}
