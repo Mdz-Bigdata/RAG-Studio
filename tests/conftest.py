@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -12,6 +15,15 @@ if os.environ.get("RAG_TEST_RERANKER") != "1":
 # 同理：向量模型默认用哈希（config.yaml 里是 BGE-M3）；`RAG_TEST_EMBEDDER=1` 才加载真实模型
 if os.environ.get("RAG_TEST_EMBEDDER") != "1":
     os.environ.setdefault("RAG_DISABLE_LOCAL_EMBEDDER", "1")
+
+# 应用测试绝不能碰真实的 data/app.db：app.config / app.db.session 在第一次 import 时就把数据库地址和 .env 里的
+# 密钥定死，而测试文件在收集阶段就可能 import 它们（早于任何 fixture）——那样整套测试会在真实库里建库、改策略、
+# 停用模型。所以在最早的时机（conftest 先于所有测试文件加载）指到临时库，并清空密钥保持离线。
+_TEST_DB_DIR = Path(tempfile.mkdtemp(prefix="rag-studio-test-"))
+atexit.register(shutil.rmtree, _TEST_DB_DIR, ignore_errors=True)
+os.environ["SQLITE_URL"] = f"sqlite:///{_TEST_DB_DIR / 'app.db'}"
+os.environ["OPENAI_API_KEY"] = ""
+os.environ["ANTHROPIC_API_KEY"] = ""
 
 from prism.config import Settings  # noqa: E402
 from prism.index import Index  # noqa: E402

@@ -2,11 +2,15 @@ from __future__ import annotations
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
 
 from ..config import app_config
 from .models import Base
 
-engine = create_engine(app_config.sqlite_url, connect_args={"check_same_thread": False})
+# 不用连接池：一个请求里常常嵌套开第二个会话（接口的 get_db + 服务内部的 SessionLocal）。默认池上限 15，
+# 并发一高（多个页面同时轮询、启动时模型还在加载），所有请求都攥着一个连接等第二个，整体卡死 30 秒后报 500。
+# SQLite 开连接很便宜，按需开、用完即关就不存在上限。
+engine = create_engine(app_config.sqlite_url, connect_args={"check_same_thread": False}, poolclass=NullPool)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
