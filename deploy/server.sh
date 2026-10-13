@@ -47,10 +47,10 @@ install_configs() {
 
 wait_ready() {
   say "等待后端就绪（首次启动要加载向量模型，可能需要一两分钟）…"
-  for _ in $(seq 1 120); do
-    if curl -fsS -m 3 "$HEALTH" >/dev/null 2>&1; then say "后端已就绪"; return 0; fi
+  for _ in $(seq 1 40); do
+    if curl -fsS -m 15 "$HEALTH" >/dev/null 2>&1; then say "后端已就绪"; return 0; fi
     systemctl is-active --quiet "$UNIT" || { echo -e "${RED}后端启动失败，最近的日志：${NC}"; journalctl -u "$UNIT" -n 30 --no-pager; return 1; }
-    sleep 2
+    sleep 3
   done
   warn "等待超时，后端仍在启动中；用 $0 logs 查看进度"
 }

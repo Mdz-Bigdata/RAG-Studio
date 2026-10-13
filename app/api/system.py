@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from prism import __version__ as core_version
 from prism.ingest.parsers import ParserRegistry
 from prism.ingest.parsers.mineru_parser import MINERU_EXTENSIONS, mineru_available
-from prism.ingest.parsers.mineru_tiers import tier_overview, verify_models
+from prism.ingest.parsers.mineru_tiers import check_connection, tier_overview, verify_models
 
 from ..config import app_config
 from ..db import Repository, get_db
@@ -76,6 +76,8 @@ def parsing():
             "recommended": overview["recommended"],
             "remote": overview["remote"],
             "source": overview["source"],
+            "mode": overview["mode"],
+            "effectiveTier": overview["effectiveTier"],
             "install": [
                 "uv pip install -U mineru                        # 基础包：ONNX CPU 小模型 + llama.cpp VLM，开箱即用",
                 'uv pip install -U "mineru[torch]>=4.0,<5"      # Torch 小模型（Apple Silicon / 有 GPU 推荐）',
@@ -83,7 +85,8 @@ def parsing():
                 "export MINERU_MODEL_SOURCE=modelscope           # 国内走 ModelScope 镜像（或在策略配置里选择模型下载源）",
                 "mineru-kit models download --tier standard      # basic ≈0.8GB；standard / advanced ≈2GB",
                 "mineru-kit models verify                        # 校验模型包完整性",
-                "mineru-kit api-server --host 0.0.0.0 --port 8000 --tier standard   # 可选：服务化后在策略配置里填 parsing.mineru.api_url",
+                "mineru-kit api-server --host 0.0.0.0 --port 8000 --tier standard   # 可选：服务化后在策略配置里选「自托管服务」并填地址",
+                "# 不想在本机跑模型：策略配置 → 文档解析 → 解析方式选「云端 API」（mineru.net，可填 API 密钥；文档会上传到 MinerU 服务器）",
             ],
         },
         "popo": {
@@ -102,9 +105,15 @@ def parsing():
 
 @router.get("/mineru/tiers")
 def mineru_tiers():
-    """MinerU 全部解析档位及其在当前环境的状态（本机安装 / 自托管服务 /v1/tiers）；策略配置页的档位下拉由此加载。"""
+    """MinerU 全部解析档位及其在当前环境的状态（本机安装 / 云端 API 或自托管服务的 /v1/tiers）；策略配置页的档位下拉由此加载。"""
     s = settings_service.get()
     return {"available": mineru_available(), "enabled": s.parsing.mineru.enabled, "tier": s.parsing.mineru.tier, "apiUrl": s.parsing.mineru.api_url, **tier_overview(s.parsing.mineru, mineru_available())}
+
+
+@router.post("/mineru/test")
+def mineru_test():
+    """测试已保存的远程解析配置（云端 API / 自托管服务）：能否连通、密钥是否有效、提供哪些档位、身份级别与限额。"""
+    return check_connection(settings_service.get().parsing.mineru)
 
 
 @router.post("/mineru/verify")

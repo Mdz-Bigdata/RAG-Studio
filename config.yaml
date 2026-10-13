@@ -19,7 +19,11 @@ parsing:
     ocr_mode: auto            # auto | txt | ocr
     image_analysis: true      # 图片 / 图表由 VLM 生成描述文字后再切片
     page_range: ""            # 仅 PDF；"1-5,r3-r1"
-    api_url: null             # 填 http://127.0.0.1:8000 则连接 `mineru-kit api-server`，否则用本地 SDK
+    mode: local               # local 本机 SDK | cloud MinerU 官方云端 API（文档上传到 mineru.net，本机不需要模型）| server 自托管 mineru-kit api-server
+    cloud:
+      api_url: https://mineru.net/api
+      api_key: ""             # mineru.net 申请的 sk_… 密钥；留空读环境变量 MINERU_API_KEY，都没有则匿名调用（有页数 / 频率限制）
+    api_url: null             # mode: server 时连接的 `mineru-kit api-server` 地址，如 http://127.0.0.1:8000
     save_outputs: true        # 落盘 markdown / content_list / middle_json，供复用与 MinerU-Popo
   popo:
     enabled: false            # 跑完 MinerU-Popo（scripts/run_popo.sh）后打开：用文档树替换页面级结构
@@ -231,6 +235,18 @@ recommend:                    # 个性化推荐：兴趣向量 = 交互条目向
   mmr_lambda: 0.7
   popularity_weight: 0.1
   exclude_seen: true
+
+lake:                         # Agent 湖（LanceDB 表 agent_lake）：问答沉淀、检索增强、湖分析
+  enabled: true
+  record_chat: true           # 每轮问答自动写入 question + retrieval + answer
+  augment: true               # 回答时召回相似历史问答作参考（余弦 ≥ augment_min_score，排除点踩 / 拒答）
+  augment_top_k: 2
+  augment_min_score: 0.75
+  low_score: 0.05             # 检索最高分低于该值记为低置信（bge-reranker 分数，无关 < 0.01）
+  sql_row_limit: 500
+  agent_max_steps: 4          # 分析智能体最多调用几次工具（含反思后追加的）
+  agent_reflect: true         # 执行完规划的工具后让模型看结果再决定要不要追加调用（ReAct）
+  catalog_examples: 3         # 规划时从湖里取几条"以前分析成功的 SQL"作示例
 
 agents:                       # 多智能体协作：规划 → 并行研究 → 分析 → 审校（证据不足改写重查）→ 撰稿
   max_review_rounds: 2

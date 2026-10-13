@@ -5,6 +5,9 @@
 #   ./start.sh            开发模式（后端热重载 + vite dev server）
 #   ./start.sh --prod     构建前端并由后端单端口托管
 #
+# 在已经用 deploy/server.sh 装成 systemd 服务的服务器上，直接执行 ./start.sh 等同于
+# deploy/server.sh start（启动服务 + Nginx，设为开机自启），不需要 Node / npm。
+#
 # 端口：BACKEND_PORT（默认 8000）/ FRONTEND_PORT（默认 5173），被占用时自动顺延。
 # ==============================================================================
 set -euo pipefail
@@ -13,6 +16,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FRONTEND_DIR="$ROOT/frontend"
 VENV="$ROOT/.venv"
 MODE="${1:-dev}"
+
+# 服务器部署：这个目录已注册为 systemd 服务时交给部署脚本，不走开发模式
+if [ "$MODE" = "dev" ] && grep -qsx "WorkingDirectory=$ROOT" /etc/systemd/system/rag-studio.service; then
+  exec "$ROOT/deploy/server.sh" start
+fi
 
 GREEN='\033[0;32m'; BLUE='\033[0;34m'; YELLOW='\033[1;33m'; NC='\033[0m'
 say() { echo -e "${BLUE}[$1]${NC} $2"; }

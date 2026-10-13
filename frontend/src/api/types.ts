@@ -430,6 +430,7 @@ export interface SystemStatus {
     mineruAvailable: boolean;
     mineruEnabled: boolean;
     mineruTier: string;
+    mineruMode?: 'local' | 'server' | 'cloud';
     popoEnabled: boolean;
     crossEncoderAvailable: boolean;
     vectorBackend: string;
@@ -689,8 +690,23 @@ export interface MineruTiersInfo {
   tiers: MineruTier[];
   hardware: { system: string; machine: string; accelerator: 'apple_silicon' | 'nvidia' | 'none'; gpuMemoryGb: number | null };
   recommended: { tier: string; extra: string; reason: string };
-  remote: { url: string; reachable: boolean; tiers: Record<string, boolean>; error: string | null } | null;
+  remote: { url: string; reachable: boolean; tiers: Record<string, boolean>; error: string | null; kind: 'cloud' | 'server'; hasKey: boolean } | null;
   source: 'remote' | 'local' | 'catalog';
+  mode: 'local' | 'server' | 'cloud';          // 实际生效的解析方式
+  effectiveTier: string;                        // 实际使用的档位（远程不提供所选档位时会改用别的）
+}
+
+// 远程解析（云端 API / 自托管服务）的连接测试结果
+export interface MineruConnectionTest {
+  ok: boolean;
+  mode: 'local' | 'server' | 'cloud';
+  url?: string;
+  hasKey?: boolean;
+  tiers?: string[];
+  accessLevel?: string | null;
+  usage?: { pages_processed?: number; files_processed?: number; jobs_created?: number } | null;
+  limits?: { max_pages_per_file?: number; max_file_size_bytes?: number } | null;
+  error?: string | null;
 }
 
 export interface ParsingInfo {

@@ -55,7 +55,7 @@ export function DashboardPage({ go }: { go: (key: PageKey) => void }) {
   ];
 
   const offline: { t: string; d: string; c: string }[] = [
-    { t: '解析', d: rt.mineruAvailable ? `MinerU 4.x · ${rt.mineruTier}${rt.popoEnabled ? ' + Popo 文档树' : ''}` : 'Markdown / Excel 行级 / pdfplumber / docx / pptx', c: 'var(--info)' },
+    { t: '解析', d: rt.mineruAvailable ? `MinerU 4.x${rt.mineruMode === 'cloud' ? ' 云端 API' : ''} · ${rt.mineruTier}${rt.popoEnabled ? ' + Popo 文档树' : ''}` : 'Markdown / Excel 行级 / pdfplumber / docx / pptx', c: 'var(--info)' },
     { t: '清洗', d: '页眉页脚 · PDF 断行 · 乱码 · 近重复', c: 'var(--info)' },
     { t: '语义感知切片', d: `${ch.strategy} · parent ${ch.parent_max_tokens} / child ${ch.child_tokens} tok · 重叠 ${Math.round((ch.child_overlap_ratio ?? 0) * 100)}%`, c: 'var(--c-mmr)' },
     { t: '索引', d: `向量(${rt.vectorBackend}) + BM25 + 实体图`, c: 'var(--c-dense)' },
@@ -122,7 +122,7 @@ export function DashboardPage({ go }: { go: (key: PageKey) => void }) {
         <div className="card-header">
           <h3>当前生效的管线</h3>
           <div className="row gap-6 wrap">
-            <Badge tone={rt.mineruAvailable ? 'ok' : 'warn'}>{rt.mineruAvailable ? `MinerU · ${rt.mineruTier}` : 'MinerU 未安装（内置解析器）'}</Badge>
+            <Badge tone={rt.mineruAvailable ? 'ok' : 'warn'}>{rt.mineruAvailable ? `MinerU${rt.mineruMode === 'cloud' ? ' 云端 API' : rt.mineruMode === 'server' ? ' 自托管' : ''} · ${rt.mineruTier}` : 'MinerU 未安装（内置解析器）'}</Badge>
             <Badge tone={rt.popoEnabled ? 'ok' : ''}>{rt.popoEnabled ? 'Popo 文档树 已启用' : 'Popo 文档树 未启用'}</Badge>
             <Badge tone={rt.crossEncoderAvailable ? 'ok' : ''}>{rt.crossEncoderAvailable ? 'Cross-Encoder 可用' : '无本地 Cross-Encoder'}</Badge>
           </div>

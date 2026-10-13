@@ -347,6 +347,7 @@ class ModelService:
             "mineruAvailable": mineru_available(),
             "mineruEnabled": s.parsing.mineru.enabled,
             "mineruTier": s.parsing.mineru.tier,
+            "mineruMode": s.parsing.mineru.resolved_mode,   # local | server | cloud
             "popoEnabled": s.parsing.popo.enabled,
             "crossEncoderAvailable": cross_encoder_available(),
             "vectorBackend": s.vector_store.backend,

@@ -4,7 +4,8 @@
 PDF 与图片支持全部四级；Office / OpenDocument / EPUB / OFD / HTML / CSV 在 flash 层由 DocVortex 原生解析。
 
 档位列表的来源（按优先级）：
-1. 配置了 `parsing.mineru.api_url` → 向自托管服务 `GET /v1/tiers` 询问它实际提供哪些档位；
+1. 远程解析（`parsing.mineru.mode` 为 cloud 官方云端 API，或 server 自托管服务）→ `GET /v1/tiers` 询问对方实际提供哪些档位；
+   选中的档位对方没有时，解析自动改用它提供的档位（见 `pick_remote_tier`）——云端目前只提供 standard；
 2. 本机装了 mineru → 四档都可选：flash 不需要模型；其余用 MinerU 自己的模型注册表逐档核对
    （`mineru.model.registry.model_repos_for_tier` + `verify_model_repo`，advanced 与 standard 共用模型包），
    并检查该档位运行时依赖是否齐全（`mineru.parser.tier.missing_modules_for_tier`）；
@@ -14,9 +15,14 @@ PDF 与图片支持全部四级；Office / OpenDocument / EPUB / OFD / HTML / CS
 from __future__ import annotations
 
 import logging
+import os
 import platform
 import shutil
 import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
 from typing import Any
 
 from ...config import MinerUConfig
@@ -65,7 +71,12 @@ STATUS_LABEL = {
     "not_installed": "未安装 MinerU",
     "remote": "由解析服务提供",
     "remote_missing": "解析服务未提供",
+    "remote_unreachable": "解析服务连接不上",
 }
+# 远程是官方云端 API 时的说法
+CLOUD_STATUS_LABEL = {"remote": "云端 API 提供", "remote_missing": "云端 API 未提供", "remote_unreachable": "云端 API 连接不上"}
+# 选中的档位远程没有时，按这个顺序改用它提供的档位
+_REMOTE_TIER_PREFERENCE = ("standard", "advanced", "basic", "flash")
 
 
 def detect_hardware() -> dict[str, Any]:
@@ -139,6 +150,71 @@ def remote_tiers(api_url: str, api_key: str = "", timeout: float = 3.0) -> dict[
     return out
 
 
+_remote_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+_remote_cache_lock = threading.Lock()
+
+
+def cached_remote_tiers(api_url: str, api_key: str = "", *, timeout: float = 3.0) -> dict[str, Any]:
+    """`remote_tiers` 的短期缓存：状态页和每次解析都要问，不必每次都发两个请求。连不上的结果只记 10 秒。"""
+    key = (api_url.rstrip("/"), api_key)
+    now = time.monotonic()
+    with _remote_cache_lock:
+        hit = _remote_cache.get(key)
+        if hit is not None and hit[0] > now:
+            return hit[1]
+    result = remote_tiers(api_url, api_key, timeout=timeout)
+    with _remote_cache_lock:
+        _remote_cache[key] = (now + (60.0 if result.get("tiers") else 10.0), result)
+    return result
+
+
+def pick_remote_tier(wanted: str, served: dict[str, bool]) -> str:
+    """远程实际用哪一档：选中的档位对方提供（或对方没说提供什么）就用它，否则改用对方提供的最接近默认质量的一档。"""
+    available = [name for name, ok in served.items() if ok]
+    if not available or wanted in available:
+        return wanted
+    return next((t for t in _REMOTE_TIER_PREFERENCE if t in available), available[0])
+
+
+def effective_tier(cfg: MinerUConfig) -> str:
+    """这份配置解析时实际使用的档位（本机 = 配置值；远程 = 对方提供的档位里挑）。"""
+    endpoint = cfg.remote_endpoint()
+    if endpoint is None:
+        return cfg.tier
+    return pick_remote_tier(cfg.tier, cached_remote_tiers(*endpoint, timeout=5.0 if cfg.mode == "cloud" else 3.0).get("tiers") or {})
+
+
+def check_connection(cfg: MinerUConfig, timeout: float = 10.0) -> dict[str, Any]:
+    """测试远程解析服务：/v1/health、/v1/tiers 和 /v1/usage（密钥是否有效、身份级别与用量限额）。"""
+    import httpx
+
+    endpoint = cfg.remote_endpoint()
+    if endpoint is None:
+        return {"ok": False, "mode": cfg.resolved_mode, "error": "当前是本机解析，没有远程服务可测试" if cfg.mode != "server" else "还没有填写解析服务地址"}
+    url, key = endpoint
+    out: dict[str, Any] = {"ok": False, "mode": cfg.mode, "url": url, "hasKey": bool(key), "tiers": [], "accessLevel": None, "usage": None, "limits": None, "error": None}
+    info = remote_tiers(url, key, timeout=timeout)
+    with _remote_cache_lock:
+        _remote_cache.pop((url, key), None)          # 刚测过：下次状态页用新结果
+    out["tiers"] = [name for name, ok in info["tiers"].items() if ok]
+    if not info["reachable"]:
+        out["error"] = f"连接不上 {url}：{info['error'] or '无响应'}"
+        return out
+    try:
+        r = httpx.get(f"{url}/v1/usage", headers={"Authorization": f"Bearer {key}"} if key else {}, timeout=timeout)
+        data = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+        if r.status_code in (401, 403) or (isinstance(data, dict) and (data.get("msgCode") == "A0202" or (isinstance(data.get("error"), dict) and "key" in str(data["error"].get("code", ""))))):
+            out["error"] = "密钥无效或已过期：" + str((data.get("error") or {}).get("message") if isinstance(data.get("error"), dict) else data.get("msg") or f"HTTP {r.status_code}")
+            return out
+        if r.status_code < 400 and isinstance(data, dict):
+            out.update(accessLevel=data.get("access_level"), usage=data.get("current"), limits=data.get("limits"))
+        # 自托管服务不一定有 /v1/usage：健康检查通过就算连通
+    except Exception as exc:
+        logger.info("MinerU /v1/usage 查询失败：%s", exc)
+    out["ok"] = True
+    return out
+
+
 def _parse_remote_tiers(payload: Any) -> dict[str, bool]:
     """响应格式宽松解析：["flash", ...] / [{"tier"|"name"|"id": .., "available"|"ready"|"enabled": ..}] / {"tiers": [...]} / {"flash": {...}}。"""
     if isinstance(payload, dict):
@@ -171,20 +247,31 @@ def tier_overview(cfg: MinerUConfig, available: bool) -> dict[str, Any]:
     """档位全景：每一档的说明 + 在当前环境里的状态。所有档位都返回、都可选。"""
     hw = detect_hardware()
     rec = recommend_tier(hw)
-    remote = remote_tiers(cfg.api_url, cfg.api_key) if cfg.api_url else None
+    endpoint = cfg.remote_endpoint()
+    cloud = cfg.mode == "cloud"
+    remote = None
+    if endpoint is not None:
+        remote = {**cached_remote_tiers(*endpoint, timeout=5.0 if cloud else 3.0), "kind": cfg.mode, "hasKey": bool(endpoint[1])}
     served = (remote or {}).get("tiers") or {}
+    use_tier = pick_remote_tier(cfg.tier, served) if remote is not None else cfg.tier
+    if remote is not None and any(served.values()):
+        # 远程解析不看本机硬件：推荐的就是对方提供的档位
+        best = pick_remote_tier("standard", served)
+        rec = {"tier": best, "extra": "", "reason": f"{'云端 API' if cloud else '解析服务'}提供 {' / '.join(t for t, ok in served.items() if ok)}，本机不需要模型包"}
     tiers: list[dict[str, Any]] = []
     catalog = list(TIER_CATALOG)
     # 解析服务报告了目录之外的档位（未来版本）：也列出来供选择
     for name in served:
         if name not in _KNOWN:
-            catalog.append({"tier": name, "label": "解析服务提供的档位", "quality": "—", "speed": "—", "use": "由自托管解析服务定义", "models": "—", "requires": "—", "needsModels": False, "modelGb": 0.0, "minMemoryGb": 0, "formats": "—"})
+            catalog.append({"tier": name, "label": "云端 API 提供的档位" if cloud else "解析服务提供的档位", "quality": "—", "speed": "—", "use": "由云端 API 定义" if cloud else "由自托管解析服务定义", "models": "—", "requires": "—", "needsModels": False, "modelGb": 0.0, "minMemoryGb": 0, "formats": "—"})
     for t in catalog:
         name = t["tier"]
         if remote is not None and remote["reachable"] and served:
             status = "remote" if served.get(name) else "remote_missing"
+        elif remote is not None and not remote["reachable"]:
+            status = "remote_unreachable"
         elif remote is not None:
-            status = "remote"            # 服务不可达 / 没有 /v1/tiers：无法判断，按服务端启动参数为准
+            status = "remote"            # 连得上但没有 /v1/tiers：无法判断，按服务端启动参数为准
         local: dict[str, Any] = {}
         if remote is not None and remote["reachable"] and served:
             pass
@@ -200,18 +287,19 @@ def tier_overview(cfg: MinerUConfig, available: bool) -> dict[str, Any]:
             "modelRepos": local.get("repos", []),
             "missingModules": local.get("missingModules", []),
             "status": status,
-            "statusLabel": STATUS_LABEL[status],
+            "statusLabel": (CLOUD_STATUS_LABEL if cloud else STATUS_LABEL).get(status, STATUS_LABEL[status]),
             "selectable": True,
             "current": name == cfg.tier,
             "recommended": name == rec["tier"],
-            "download": f"mineru-kit models download --tier {'standard' if name == 'advanced' else name}" if t["needsModels"] else None,
+            "download": f"mineru-kit models download --tier {'standard' if name == 'advanced' else name}" if t["needsModels"] and remote is None else None,
         })
-    return {"tiers": tiers, "hardware": hw, "recommended": rec, "remote": remote, "source": "remote" if remote is not None else ("local" if available else "catalog")}
+    return {"tiers": tiers, "hardware": hw, "recommended": rec, "remote": remote, "mode": cfg.resolved_mode, "effectiveTier": use_tier, "source": "remote" if remote is not None else ("local" if available else "catalog")}
 
 
 def verify_models(tier: str | None = None, timeout: float = 120.0) -> dict[str, Any]:
     """`mineru-kit models verify [--tier basic|standard]`：校验本机模型包是否完整。"""
-    exe = shutil.which("mineru-kit")
+    # 以 systemd 服务运行时没有激活虚拟环境，PATH 里没有 .venv/bin：先到当前解释器旁边找
+    exe = shutil.which("mineru-kit", path=os.pathsep.join([str(Path(sys.executable).parent), os.environ.get("PATH", "")]))
     if exe is None:
         return {"ok": False, "ran": False, "output": "未找到 mineru-kit：先安装 MinerU（uv pip install -U \"mineru[torch]>=4.0,<5\"）"}
     try:

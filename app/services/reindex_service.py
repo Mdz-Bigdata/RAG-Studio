@@ -34,7 +34,8 @@ def ingest_fingerprint() -> str:
     """影响"已入库文档长什么样"的全部参数。检索期参数（融合 / 精排 / 压缩…）不在其中，改了立即生效。"""
     s = settings_service.get()
     parts: dict[str, Any] = {
-        "parsing": s.parsing.model_dump(mode="json"),
+        # mode / cloud 是后加的字段：本机解析时不进指纹（否则升级后所有索引都被判过期），见下面的 mineru_remote
+        "parsing": s.parsing.model_dump(mode="json", exclude={"mineru": {"mode", "cloud"}}),
         "cleaning": s.cleaning.model_dump(mode="json"),
         "chunking": s.chunking.model_dump(mode="json"),
         "enrich": s.enrich.model_dump(mode="json"),
@@ -44,6 +45,9 @@ def ingest_fingerprint() -> str:
         "graph_llm_extraction": s.retrieval.graph.llm_extraction,
         "graph_unweaver": s.retrieval.graph.unweaver_enabled,
     }
+    if s.parsing.mineru.resolved_mode == "cloud":
+        # 换成云端解析（或换了云端地址）结果会变，要重建；换密钥不用
+        parts["mineru_remote"] = ["cloud", s.parsing.mineru.cloud.api_url]
     if s.corpus.keywords:
         # 只在开启时加入：新增配置段不应让所有已有索引被判为过期
         parts["corpus_keywords"] = s.corpus.keywords_per_chunk

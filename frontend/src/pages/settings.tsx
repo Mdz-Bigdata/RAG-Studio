@@ -1,25 +1,34 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Boxes, CheckCircle2, FileText, GitBranch, Layers, Network, RotateCcw, Save, Scissors, ShieldCheck, Shuffle, Sparkles, Zap, RefreshCw } from 'lucide-react';
 import { api } from '../api/client';
-import type { MineruTiersInfo, PresetsPayload, SettingsPayload, StrategyPreset, ReindexStatus } from '../api/types';
+import type { MineruConnectionTest, MineruTiersInfo, PresetsPayload, SettingsPayload, StrategyPreset, ReindexStatus } from '../api/types';
 import { Badge, Button, Callout, Spinner, Toggle } from '../components/ui';
 import { useApp } from '../store/app-store';
 import { VectorBenchmarkCard } from '../components/vector-benchmark';
 
-type FieldSpec =
-  | { path: string; label: string; type: 'bool'; hint?: string }
-  | { path: string; label: string; type: 'num'; min: number; max: number; step?: number; nullable?: boolean; hint?: string }
-  | { path: string; label: string; type: 'select'; options: [string, string][]; hint?: string }
-  | { path: string; label: string; type: 'text'; placeholder?: string; hint?: string };
+// when：按其他字段的当前值决定是否显示；secret：密钥，后端只回传脱敏值，留空 = 不修改
+type FieldSpec = { path: string; label: string; hint?: string; when?: (val: (path: string) => any) => boolean } & (
+  | { type: 'bool' }
+  | { type: 'num'; min: number; max: number; step?: number; nullable?: boolean }
+  | { type: 'select'; options: [string, string][] }
+  | { type: 'text'; placeholder?: string }
+  | { type: 'secret'; placeholder?: string }
+);
+const MASKED = '********';
+const mineruMode = (val: (path: string) => any) => String(val('parsing.mineru.mode') ?? 'local');
 
 const GROUPS: { title: string; icon: React.ReactNode; tone: string; note?: string; reindex?: boolean; fields: FieldSpec[] }[] = [
   {
     title: '文档解析', icon: <FileText size={14} />, tone: 'info', reindex: true, note: 'Markdown 永远直解析；Excel / CSV 走行级结构化；其余格式优先 MinerU。',
     fields: [
       { path: 'parsing.mineru.enabled', label: '启用 MinerU', type: 'bool', hint: '未安装 mineru 包时自动使用内置解析器' },
-      // 选项由后端 /system/mineru/tiers 动态加载（本机安装情况 / 自托管服务 /v1/tiers）；这里的静态列表只是接口不可用时的兜底
+      { path: 'parsing.mineru.mode', label: '解析方式', type: 'select', options: [['local', '本机（下载模型包）'], ['cloud', '云端 API（mineru.net）'], ['server', '自托管服务（mineru-kit api-server）']] },
+      { path: 'parsing.mineru.cloud.api_key', label: '云端 API 密钥', type: 'secret', placeholder: 'sk_…（可留空，匿名调用）', when: (v) => mineruMode(v) === 'cloud' },
+      { path: 'parsing.mineru.api_url', label: '解析服务地址', type: 'text', placeholder: 'http://127.0.0.1:8000', when: (v) => mineruMode(v) === 'server' },
+      { path: 'parsing.mineru.api_key', label: '解析服务密钥', type: 'secret', placeholder: '未启用鉴权可留空', when: (v) => mineruMode(v) === 'server' },
+      // 选项由后端 /system/mineru/tiers 动态加载（本机安装情况 / 云端 API 或自托管服务的 /v1/tiers）；这里的静态列表只是接口不可用时的兜底
       { path: 'parsing.mineru.tier', label: 'MinerU 档位', type: 'select', options: [['flash', 'flash · 原生文本，无模型'], ['basic', 'basic · 小模型 OCR / 公式 / 表格'], ['standard', 'standard · 小模型 + VLM'], ['advanced', 'advanced · 最高质量']] },
-      { path: 'parsing.mineru.model_source', label: '模型下载源', type: 'select', options: [['', '默认（HuggingFace）'], ['huggingface', 'HuggingFace'], ['modelscope', 'ModelScope（国内）']] },
+      { path: 'parsing.mineru.model_source', label: '模型下载源', type: 'select', options: [['', '默认（HuggingFace）'], ['huggingface', 'HuggingFace'], ['modelscope', 'ModelScope（国内）']], when: (v) => mineruMode(v) === 'local' },
       { path: 'parsing.mineru.ocr_mode', label: 'OCR 模式', type: 'select', options: [['auto', 'auto'], ['txt', 'txt'], ['ocr', 'ocr']] },
       { path: 'parsing.mineru.image_analysis', label: '图片 / 图表内容分析', type: 'bool' },
       { path: 'parsing.popo.enabled', label: '使用 MinerU-Popo 文档树', type: 'bool', hint: '需先跑完 Popo 推理；跨页表格合并、段落续接、标题层级重建' },
@@ -224,6 +233,7 @@ export function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [mineru, setMineru] = useState<MineruTiersInfo | null>(null);
   const [verify, setVerify] = useState<{ loading: boolean; ok?: boolean; output?: string }>({ loading: false });
+  const [conn, setConn] = useState<{ loading: boolean; result?: MineruConnectionTest }>({ loading: false });
   const [presets, setPresets] = useState<PresetsPayload | null>(null);
   const [preset, setPreset] = useState<string | null>(null);
   const loadTiers = () => api.system.mineruTiers().then(setMineru).catch(() => setMineru(null));
@@ -262,11 +272,20 @@ export function SettingsPage() {
   }, [watch]); // eslint-disable-line
 
   const dirty = Object.keys(edits).length;
-  const needsReindex = useMemo(() => GROUPS.some((g) => g.reindex && g.fields.some((f) => f.path in edits)), [edits]);
+  const needsReindex = useMemo(() => GROUPS.some((g) => g.reindex && g.fields.some((f) => f.type !== 'secret' && f.path in edits)), [edits]);
   const val = (path: string) => (path in edits ? edits[path] : getPath(data?.effective, path));
   const change = (path: string, v: any) => setEdits((e) => {
     const next = { ...e };
-    if (JSON.stringify(v) === JSON.stringify(getPath(data?.effective, path))) delete next[path]; else next[path] = v;
+    const put = (p: string, x: any) => { if (JSON.stringify(x) === JSON.stringify(getPath(data?.effective, p))) delete next[p]; else next[p] = x; };
+    put(path, v);
+    // 云端 API 不提供 flash / basic：切过去时把档位一并换成 standard，免得界面显示的档位和实际用的不一致
+    if (path === 'parsing.mineru.mode' && v === 'cloud' && !['standard', 'advanced'].includes(String(next['parsing.mineru.tier'] ?? getPath(data?.effective, 'parsing.mineru.tier')))) put('parsing.mineru.tier', 'standard');
+    return next;
+  });
+  // 密钥：输入框清空 = 不修改（撤销这项改动）；要删除已保存的密钥用旁边的「清除」
+  const changeSecret = (path: string, v: string) => setEdits((e) => {
+    const next = { ...e };
+    if (v === '') delete next[path]; else next[path] = v;
     return next;
   });
 
@@ -320,16 +339,17 @@ export function SettingsPage() {
     const t = mineru?.tiers.find((x) => x.tier === selected);
     if (!mineru || !t) return null;
     const tone = t.status === 'ready' || t.status === 'remote' ? 'ok' : 'warn';
+    const remoteName = mineru.remote?.kind === 'cloud' ? '云端 API' : '解析服务';
     return (
       <div className="chunk col gap-6" style={{ margin: '2px 0 10px' }}>
         <div className="row gap-6 wrap">
           <Badge mono tone="accent">{t.tier}</Badge>
           <Badge tone={tone}>{t.statusLabel}</Badge>
-          {t.recommended ? <Badge tone="info"><CheckCircle2 size={10} />本机推荐</Badge> : null}
+          {t.recommended ? <Badge tone="info"><CheckCircle2 size={10} />{mineru.remote ? '推荐' : '本机推荐'}</Badge> : null}
           <Badge mono>质量 {t.quality}</Badge><Badge mono>速度 {t.speed}</Badge>
         </div>
         <div className="small">{t.use}</div>
-        <div className="xs muted">模型：{t.models} · 运行要求：{t.requires}</div>
+        {mineru.remote ? <div className="xs muted">由{remoteName}运行，本机不需要模型包和显存</div> : <div className="xs muted">模型：{t.models} · 运行要求：{t.requires}</div>}
         <div className="xs muted">支持格式：{t.formats}</div>
         {t.status === 'not_installed' ? <div className="xs text-warning">本机未安装 MinerU：档位可以先选好，安装后对文档点「重新解析」即生效；在此之前由内置解析器处理。<code style={{ marginLeft: 4 }}>uv pip install -U "mineru[torch]&gt;=4.0,&lt;5"</code></div> : null}
         {t.status === 'needs_models' && t.download ? (
@@ -340,10 +360,39 @@ export function SettingsPage() {
         ) : null}
         {t.modelRepos.length ? <div className="row gap-4 wrap">{t.modelRepos.map((r) => <Badge key={r.name} mono tone={r.ready ? 'ok' : 'warn'} title={r.root}>{r.name} · {r.ready ? '已就绪' : `缺 ${r.missing} 项`}</Badge>)}</div> : null}
         {t.status === 'missing_deps' ? <div className="xs text-warning">缺少运行依赖：<code>{t.missingModules.join(', ')}</code>。安装 <code>mineru[torch]</code>（Torch 小模型）或 <code>mineru[full]</code>（vLLM / LMDeploy）后重试。</div> : null}
-        {t.status === 'remote_missing' ? <div className="xs text-warning">解析服务 {mineru.remote?.url} 的 /v1/tiers 没有列出这个档位：用 <code>mineru-kit api-server --tier {t.tier}</code> 启动服务后再选。</div> : null}
-        {mineru.remote && !mineru.remote.reachable ? <div className="xs text-warning">解析服务 {mineru.remote.url} 暂时无法访问（{mineru.remote.error ?? '无响应'}），档位以服务端启动参数为准。</div> : null}
+        {t.status === 'remote_missing' && mineru.remote?.kind === 'cloud' ? <div className="xs text-warning">云端 API 不提供这个档位，解析时会自动改用 <code>{mineru.effectiveTier}</code>。</div> : null}
+        {t.status === 'remote_missing' && mineru.remote?.kind !== 'cloud' ? <div className="xs text-warning">解析服务 {mineru.remote?.url} 的 /v1/tiers 没有列出这个档位，解析时会自动改用 <code>{mineru.effectiveTier}</code>；要用这一档，用 <code>mineru-kit api-server --tier {t.tier}</code> 启动服务。</div> : null}
+        {mineru.remote && !mineru.remote.reachable ? <div className="xs text-warning">{remoteName} {mineru.remote.url} 暂时无法访问（{mineru.remote.error ?? '无响应'}）{mineru.remote.kind === 'cloud' ? '，文档会改用内置解析器处理。' : '，档位以服务端启动参数为准。'}</div> : null}
         {verify.output !== undefined ? <pre className={`pre xs ${verify.ok ? 'text-success' : 'text-warning'}`} style={{ margin: 0, maxHeight: 140, overflow: 'auto' }}>{verify.ok ? '模型包完整。\n' : ''}{verify.output}</pre> : null}
-        {!t.recommended ? <div className="xs faint">按本机硬件的建议：{mineru.recommended.reason}。<button className="btn ghost xs" onClick={() => change('parsing.mineru.tier', mineru.recommended.tier)}>改用 {mineru.recommended.tier}</button></div> : null}
+        {!t.recommended ? <div className="xs faint">{mineru.remote ? '建议' : '按本机硬件的建议'}：{mineru.recommended.reason}。<button className="btn ghost xs" onClick={() => change('parsing.mineru.tier', mineru.recommended.tier)}>改用 {mineru.recommended.tier}</button></div> : null}
+      </div>
+    );
+  };
+  const runConnTest = async () => {
+    setConn({ loading: true });
+    try { const r = await api.system.mineruTest(); loadTiers(); setConn({ loading: false, result: r }); } catch (e) { setConn({ loading: false, result: { ok: false, mode: 'cloud', error: e instanceof Error ? e.message : String(e) } }); }
+  };
+  const mb = (bytes?: number) => (bytes ? `${Math.round(bytes / 1048576)}MB` : '—');
+  const modeDetail = (mode: string) => {
+    if (mode !== 'cloud' && mode !== 'server') return null;
+    const unsaved = ['parsing.mineru.mode', 'parsing.mineru.cloud.api_key', 'parsing.mineru.api_url', 'parsing.mineru.api_key'].some((p) => p in edits);
+    const r = conn.result;
+    return (
+      <div className="chunk col gap-6" style={{ margin: '2px 0 10px' }}>
+        {mode === 'cloud' ? (
+          <div className="xs muted">文档会<b>上传到 MinerU 官方服务器</b>（mineru.net）解析，结果取回后在本机切片入库；本机不需要模型包和显存，适合内存小、没有 GPU 的机器用高质量档位。不填密钥时以匿名身份调用，有页数 / 频率限制；涉密文档请用本机或自托管方式。</div>
+        ) : (
+          <div className="xs muted">连接你自己部署的 <code>mineru-kit api-server</code>（与云端 API 同一套 v1 接口），文档只发给这台服务。</div>
+        )}
+        <div className="row gap-8 wrap xs">
+          <Button size="xs" loading={conn.loading} disabled={unsaved} onClick={runConnTest}><ShieldCheck size={11} />测试连接</Button>
+          {unsaved ? <span className="faint">先保存，再测试连接</span> : null}
+          {!unsaved && r ? <Badge tone={r.ok ? 'ok' : 'bad'}>{r.ok ? '连接正常' : '连接失败'}</Badge> : null}
+          {!unsaved && r?.ok && r.accessLevel ? <Badge mono>身份 {r.accessLevel}</Badge> : null}
+          {!unsaved && r?.ok && r.tiers?.length ? <Badge mono>档位 {r.tiers.join(' / ')}</Badge> : null}
+        </div>
+        {!unsaved && r && !r.ok ? <div className="xs text-warning">{r.error}</div> : null}
+        {!unsaved && r?.ok && r.limits ? <div className="xs faint">限额：单文件 ≤ {r.limits.max_pages_per_file ?? '—'} 页 / {mb(r.limits.max_file_size_bytes)}{r.usage ? `；本周期已处理 ${r.usage.pages_processed ?? 0} 页` : ''}{mode === 'cloud' && !r.hasKey ? '（匿名额度，填入密钥后按账号额度计）' : ''}</div> : null}
       </div>
     );
   };
@@ -395,14 +444,15 @@ export function SettingsPage() {
             <div className="card-header"><h3><span className={`badge ${g.tone}`} style={{ padding: '3px 6px' }}>{g.icon}</span>{g.title}</h3>{g.reindex && g.fields.some((f) => f.path in edits) ? <Badge tone="info">保存后自动重建索引</Badge> : null}</div>
             <div className="card-body" style={{ paddingTop: 6, paddingBottom: 6 }}>
               {g.note ? <div className="xs faint" style={{ padding: '6px 0 2px' }}>{g.note}</div> : null}
-              {g.fields.map((f) => {
+              {g.fields.filter((f) => !f.when || f.when(val)).map((f) => {
                 const v = val(f.path);
+                const isMode = f.path === 'parsing.mineru.mode';
                 const hint = f.hint ?? data.fieldDocs[f.path];
                 const isTier = f.path === 'parsing.mineru.tier';
                 const options = f.type === 'select' ? (isTier ? tierOptions(f.options, String(v ?? '')) : f.options) : [];
                 return (
                   <div key={f.path}>
-                  <div className="field inline setting-row" style={isTier ? { borderBottom: 'none' } : undefined}>
+                  <div className="field inline setting-row" style={isTier || (isMode && v !== 'local') ? { borderBottom: 'none' } : undefined}>
                     <label style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 1 }}>
                       <span className="row gap-6">{f.label}{f.path in edits ? <span className="dot busy" /> : overridden(f.path) ? <span className="dot ok" title="已覆盖默认值" /> : null}</span>
                       {hint ? <span className="hint">{hint}</span> : null}
@@ -411,11 +461,18 @@ export function SettingsPage() {
                       <select style={{ width: isTier ? 300 : 220 }} value={v ?? ''} onChange={(e) => change(f.path, e.target.value === '' && f.path.endsWith('model_source') ? null : e.target.value)}>{options.map(([val2, label]) => <option key={val2} value={val2}>{label}</option>)}</select>
                     ) : f.type === 'text' ? (
                       <input type="text" style={{ width: 220 }} value={v ?? ''} placeholder={f.placeholder} onChange={(e) => change(f.path, e.target.value.trim() === '' ? null : e.target.value.trim())} />
+                    ) : f.type === 'secret' ? (
+                      <span className="row gap-6">
+                        <input type="password" autoComplete="new-password" style={{ width: 220 }} value={f.path in edits ? edits[f.path] : ''} placeholder={getPath(data.effective, f.path) === MASKED ? '已保存，留空则不修改' : f.placeholder} onChange={(e) => changeSecret(f.path, e.target.value.trim())} />
+                        {getPath(data.effective, f.path) === MASKED && !(f.path in edits) ? <button className="btn ghost xs" title="删除已保存的密钥（保存后生效）" onClick={() => setEdits((e) => ({ ...e, [f.path]: '' }))}>清除</button> : null}
+                        {edits[f.path] === '' ? <span className="xs text-warning">保存后清除</span> : null}
+                      </span>
                     ) : (
                       <input type="number" style={{ width: 100 }} min={f.min} max={f.max} step={f.step ?? 1} value={v ?? ''} placeholder={f.nullable ? '不设' : ''} onChange={(e) => change(f.path, e.target.value === '' ? (f.nullable ? null : getPath(data.effective, f.path)) : Number(e.target.value))} />
                     )}
                   </div>
                   {isTier ? tierDetail(String(v ?? '')) : null}
+                  {isMode ? modeDetail(String(v ?? 'local')) : null}
                   </div>
                 );
               })}

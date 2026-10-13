@@ -11,6 +11,9 @@ MinerU 4.0 用四个质量档位取代了 3.x 的 pipeline/vlm/hybrid 后端：
     mineru-kit models download --tier standard    # 下载 MinerU-4 模型包
     mineru-kit api-server --port 8000 --tier standard   # 可选：作为服务部署，本模块通过 MinerUApiParser 连接
 
+不想在本机跑模型（没有 GPU / 内存小）：`parsing.mineru.mode: cloud` 走 MinerU 官方云端 API（https://mineru.net/api，
+密钥填 `parsing.mineru.cloud.api_key` 或环境变量 MINERU_API_KEY；不填则匿名调用，有页数限制）。文档会上传到 MinerU 服务器。
+
 SDK（本模块使用的公开接口，来自 mineru.parser / mineru.render）：
     from mineru.parser import parse, MinerUApiParser, ParseResult
     from mineru.render import render_content_list          # Content List V1（扁平，带 text_level / page_idx / bbox）
@@ -61,6 +64,7 @@ class MinerUParser(BaseParser):
         self.cfg = cfg
         self.out_dir = out_dir
         self._api_parser: Any = None
+        self._used_tier: str | None = None   # 远程解析实际用的档位（对方不提供所选档位时会改用别的）
 
     # ----------------------------------------------------------------------------------
     def parse(self, path: Path, metadata: DocMetadata | None = None) -> ParsedDocument:
@@ -71,7 +75,9 @@ class MinerUParser(BaseParser):
         markdown = result.markdown()
 
         doc = self._new_document(path, metadata)
-        doc.metadata.parser_tier = self.cfg.tier
+        doc.metadata.parser_tier = self._used_tier or self.cfg.tier
+        if self.cfg.resolved_mode != "local":
+            doc.metadata.extra["mineru_mode"] = self.cfg.resolved_mode
         doc.markdown = strip_data_uri_images(markdown)   # 内嵌图片的 base64 不进正文；像素由图片索引保存
         doc.blocks = content_list_to_blocks(content_list)
         doc.metadata.extra["mineru_content_list"] = content_list  # 供 MinerU-Popo 桥接使用
@@ -82,17 +88,32 @@ class MinerUParser(BaseParser):
 
     def _run(self, path: Path):
         if self.cfg.model_source:
+            # MinerU 在 import 时就把环境变量读进 config 了（mineru_available() 已经 import 过），
+            # 之后再改环境变量不生效：环境变量留给子进程，本进程直接改它的 config
             os.environ["MINERU_MODEL_SOURCE"] = self.cfg.model_source
+            from mineru.config import config as mineru_config
+
+            mineru_config.model.source = self.cfg.model_source
         page_range = self.cfg.page_range if path.suffix.lower() == ".pdf" else ""
-        if self.cfg.api_url:
+        endpoint = self.cfg.remote_endpoint()
+        if endpoint is not None:
+            # 远程解析（官方云端 API / 自托管 mineru-kit api-server，同一套 v1 协议）：上传 → 建任务 → 轮询 → 取结果
             from mineru.parser import MinerUApiParser
 
+            from .mineru_tiers import effective_tier
+
             if self._api_parser is None:
+                cloud = self.cfg.mode == "cloud"
+                self._used_tier = effective_tier(self.cfg)
+                if self._used_tier != self.cfg.tier:
+                    logger.info("MinerU %s不提供 %s 档，改用 %s", "云端 API " if cloud else "解析服务", self.cfg.tier, self._used_tier)
                 self._api_parser = MinerUApiParser(
-                    api_url=self.cfg.api_url,
-                    api_key=self.cfg.api_key,
-                    tier=self.cfg.tier,
-                    include_images=False,
+                    api_url=endpoint[0],
+                    api_key=endpoint[1] or None,        # None：SDK 再读 MINERU_API_KEY，都没有就匿名调用
+                    tier=self._used_tier,
+                    ocr_mode=None if self.cfg.ocr_mode == "auto" else self.cfg.ocr_mode,
+                    # 云端：图片随结果包一起取回并内嵌（与本机解析一致，图片索引才有像素）
+                    include_images=cloud,
                 )
             return self._api_parser.parse(str(path), page_range=page_range)
 

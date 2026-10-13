@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class PathsConfig(BaseModel):
@@ -25,8 +25,21 @@ class PathsConfig(BaseModel):
     lancedb_dir: Path = Path("data/lancedb")     # 全局 LanceDB：记忆 / 推荐 / 多智能体黑板 / 多模态表（知识库向量在各自索引目录）
 
 
+MINERU_CLOUD_API_URL = "https://mineru.net/api"
+
+
+class MinerUCloudConfig(BaseModel):
+    """MinerU 官方云端 API（mineru.net，v1 协议，与自托管 `mineru-kit api-server` 同一套接口）。"""
+
+    api_url: str = MINERU_CLOUD_API_URL
+    api_key: str = ""                    # 留空读环境变量 MINERU_API_KEY；两者都没有时以匿名身份调用（有页数 / 频率限制）
+
+
 class MinerUConfig(BaseModel):
     enabled: bool = True
+    # 解析在哪里跑：local 本机 SDK（要下载模型包）| server 自托管 mineru-kit api-server（api_url）| cloud 官方云端 API（cloud.*）
+    # 云端模式会把文档上传到 MinerU 服务器；本机不需要模型包和内存，适合没有 GPU 的小机器用 standard 档
+    mode: Literal["local", "server", "cloud"] = "local"
     # flash: 原生文本无推理；basic: 小模型 OCR/公式/表格（CPU 可跑）；standard: 小模型 + VLM（默认）；advanced: 更多算力
     # 不用 Literal：自托管解析服务（/v1/tiers）可能提供目录之外的档位
     tier: str = "standard"
@@ -37,6 +50,28 @@ class MinerUConfig(BaseModel):
     api_key: str = ""
     save_outputs: bool = True            # 落盘 markdown / middle_json / structured_content 便于复用与 Popo
     model_source: Literal["huggingface", "modelscope"] | None = None   # 模型下载源；国内用 modelscope（MINERU_MODEL_SOURCE）
+    cloud: MinerUCloudConfig = MinerUCloudConfig()
+
+    @model_validator(mode="before")
+    @classmethod
+    def _infer_mode(cls, data: Any) -> Any:
+        """旧配置没有 mode：只要填了 api_url 就是连自托管服务。"""
+        if isinstance(data, dict) and "mode" not in data and data.get("api_url"):
+            return {**data, "mode": "server"}
+        return data
+
+    def remote_endpoint(self) -> tuple[str, str] | None:
+        """远程解析的（地址, 密钥）；本机解析返回 None。server 模式没填地址时无处可连，按本机处理。"""
+        if self.mode == "cloud":
+            return (self.cloud.api_url or MINERU_CLOUD_API_URL).rstrip("/"), self.cloud.api_key or os.environ.get("MINERU_API_KEY", "")
+        if self.mode == "server" and self.api_url:
+            return self.api_url.rstrip("/"), self.api_key
+        return None
+
+    @property
+    def resolved_mode(self) -> Literal["local", "server", "cloud"]:
+        """实际生效的模式（server 没填地址 → local）。"""
+        return self.mode if self.remote_endpoint() is not None else "local"
 
 
 class PopoConfig(BaseModel):
@@ -462,7 +497,9 @@ class LakeConfig(BaseModel):
     augment_min_score: float = 0.75      # 历史问题与当前问题的余弦相似度下限（BGE-M3 同义改写约 0.75~0.9）
     low_score: float = 0.05              # 检索最高分低于该值记为"低置信"（bge-reranker 分数，无关 < 0.01）
     sql_row_limit: int = 500             # SQL 分析返回的最多行数
-    agent_max_steps: int = 4             # 分析智能体最多调用几次工具
+    agent_max_steps: int = 4             # 分析智能体最多调用几次工具（含反思后追加的）
+    agent_reflect: bool = True           # 执行完规划的工具后让模型看结果再决定要不要追加调用（ReAct），直到够用或达到上限
+    catalog_examples: int = 3            # 规划时从湖里取几条"以前分析成功的 SQL"作为示例（按问题相似度）
 
 
 class Settings(BaseModel):

@@ -14,6 +14,10 @@ Environment=HF_HOME=@ROOT@/.cache/huggingface
 Environment=HF_ENDPOINT=https://hf-mirror.com
 Environment=HF_HUB_DISABLE_XET=1
 Environment=RAG_DISABLE_LOCAL_RERANKER=1
+# MinerU：模型包和配置放在服务账号可写的目录（默认的 ~/.mineru、~/.modelscope 落在只读的项目根目录）；国内从 ModelScope 下载
+Environment=MINERU_HOME=@ROOT@/.cache/mineru
+Environment=MODELSCOPE_HOME=@ROOT@/.cache/modelscope_home
+Environment=MINERU_MODEL_SOURCE=modelscope
 Environment=TOKENIZERS_PARALLELISM=false
 Environment=OMP_NUM_THREADS=2
 ExecStart=@ROOT@/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000

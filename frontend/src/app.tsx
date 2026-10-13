@@ -141,7 +141,7 @@ function Shell() {
               <div className="status-row"><span className={`dot ${llmOk ? 'ok' : 'warn'}`} />LLM<b title={rt?.llm.model ?? ''}>{llmOk ? rt?.llm.model : '抽取式回答'}</b></div>
               <div className="status-row"><span className={`dot ${embOk ? 'ok' : 'warn'}`} />嵌入<b title={rt?.embedding.model ?? ''}>{rt?.embedding.model ?? '—'}</b></div>
               <div className="status-row"><span className={`dot ${rt?.rerank.offline ? 'warn' : 'ok'}`} />重排<b>{rt?.rerank.provider ?? '—'}</b></div>
-              <div className="status-row"><span className={`dot ${rt?.mineruAvailable ? 'ok' : 'warn'}`} />解析<b>{rt?.mineruAvailable ? `mineru · ${rt.mineruTier}` : '内置解析器'}</b></div>
+              <div className="status-row"><span className={`dot ${rt?.mineruAvailable ? 'ok' : 'warn'}`} />解析<b>{rt?.mineruAvailable ? `mineru${rt.mineruMode === 'cloud' ? ' 云端' : rt.mineruMode === 'server' ? ' 服务' : ''} · ${rt.mineruTier}` : '内置解析器'}</b></div>
             </div>
           ) : null}
           <button className="nav-item" onClick={() => setCollapsed((c) => !c)} title={collapsed ? '展开侧栏' : '收起侧栏'}>

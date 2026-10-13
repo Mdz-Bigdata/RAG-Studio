@@ -1,5 +1,5 @@
 // 后端 API 客户端。开发态通过 Vite 代理 `/api` → FastAPI（VITE_API_TARGET，默认 http://localhost:8000）；生产态由 FastAPI 静态托管。
-import type { AliasSuggestion, AugmentState, FaqStatus, HealthReport, MetaField, MetaRow, ChatMessage, ChatPlan, ChatSession, ChatSource, ChunkView, CoverageReport, Document, EntityRelation, EvalExample, EvalReport, ImageHitView, ImageView, KnowledgeBase, MultimodalEvalReport, MineruTiersInfo, ModelConfig, MultimodalMode, MultimodalResponse, MultimodalStatus, ParsingInfo, PopoStatus, EditBackup, PresetsPayload, ProviderPreset, RetrievalMode, RetrievalOverrides, RetrievalResponse, RouteResult, RuntimeInfo, SettingsPayload, SystemStatus, WeavedRelation, ReindexStatus, UserIdentity, VectorBenchmark, KbGraph } from './types';
+import type { AliasSuggestion, AugmentState, FaqStatus, HealthReport, MetaField, MetaRow, MineruConnectionTest, ChatMessage, ChatPlan, ChatSession, ChatSource, ChunkView, CoverageReport, Document, EntityRelation, EvalExample, EvalReport, ImageHitView, ImageView, KnowledgeBase, MultimodalEvalReport, MineruTiersInfo, ModelConfig, MultimodalMode, MultimodalResponse, MultimodalStatus, ParsingInfo, PopoStatus, EditBackup, PresetsPayload, ProviderPreset, RetrievalMode, RetrievalOverrides, RetrievalResponse, RouteResult, RuntimeInfo, SettingsPayload, SystemStatus, WeavedRelation, ReindexStatus, UserIdentity, VectorBenchmark, KbGraph } from './types';
 import type { HardNegativeMiningConfig, HardNegativeReport, MetadataFacets } from './types';
 
 export const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? '/api/v1';
@@ -39,6 +39,7 @@ export const api = {
     status: () => request<SystemStatus>('/system/status'),
     parsing: () => request<ParsingInfo>('/system/parsing'),
     mineruTiers: () => request<MineruTiersInfo>('/system/mineru/tiers'),
+    mineruTest: () => request<MineruConnectionTest>('/system/mineru/test', { method: 'POST' }),
     mineruVerify: (tier?: string) => request<{ ok: boolean; ran: boolean; output: string }>(`/system/mineru/verify${tier ? `?tier=${encodeURIComponent(tier)}` : ''}`, { method: 'POST' }),
   },
   kb: {

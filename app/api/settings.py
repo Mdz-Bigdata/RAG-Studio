@@ -57,7 +57,11 @@ FIELD_DOCS = {
     "multimodal.weight_lance_mm": "LanceDB 多模态表路在 RRF 融合里的权重；0 = 只同步表、不参与检索",
     "parsing.mineru.tier": "四档按「质量—速度—成本」取舍；PDF / 图片支持全部四档，Office 等在 flash 层原生解析",
     "parsing.mineru.model_source": "模型包下载源；国内网络选 modelscope",
-    "parsing.mineru.api_url": "填写后连接自托管 mineru-kit api-server，档位由服务端 /v1/tiers 决定",
+    "parsing.mineru.mode": "文档在哪里解析：本机、MinerU 官方云端，或自己部署的解析服务",
+    "parsing.mineru.api_url": "自托管 mineru-kit api-server 的地址，如 http://10.0.0.5:8000；档位由服务端 /v1/tiers 决定",
+    "parsing.mineru.api_key": "自托管服务启用了鉴权时填写",
+    "parsing.mineru.cloud.api_key": "在 mineru.net 申请的 API 密钥（sk_…）；留空读环境变量 MINERU_API_KEY，都没有则匿名调用（有页数 / 频率限制）",
+    "parsing.mineru.cloud.api_url": "官方云端 API 地址，一般不用改",
 }
 
 
@@ -126,9 +130,19 @@ DECISION_GUIDE = [
 def _mask_secrets(obj):
     """配置里的 api_key 不回传明文（模型配置中心的密钥同样只返回脱敏值）。"""
     if isinstance(obj, dict):
-        return {k: ("********" if k == "api_key" and v else _mask_secrets(v)) for k, v in obj.items()}
+        return {k: (MASKED if k == "api_key" and v else _mask_secrets(v)) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_mask_secrets(x) for x in obj]
+    return obj
+
+
+MASKED = "********"
+
+
+def _drop_masked(obj):
+    """前端把脱敏后的占位符原样传回来时丢掉这一项，否则会把真正的密钥覆盖成星号。"""
+    if isinstance(obj, dict):
+        return {k: _drop_masked(v) for k, v in obj.items() if not (k == "api_key" and v == MASKED)}
     return obj
 
 
@@ -147,7 +161,7 @@ def get_settings():
 @router.put("/")
 def update_settings(body: SettingsUpdate):
     try:
-        s = settings_service.update(body.overrides)
+        s = settings_service.update(_drop_masked(body.overrides))
     except Exception as exc:
         raise HTTPException(400, f"配置无效：{exc}") from exc
     model_service.invalidate()

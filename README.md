@@ -234,13 +234,14 @@ API：`/api/v1/lancedb/*`、`/api/v1/memory/*`、`/api/v1/recommend/*`、`/api/v
 | --- | --- | --- |
 | 检索增强 | 回答前按向量召回相似的历史问题（余弦 ≥ `lake.augment_min_score` 0.75，排除同一会话），只取状态正常、没被点踩的回答，作为 `<历史问答参考>` 交给模型——不编号、不可引用，事实以本轮资料为准；本轮没检索到资料时不带 | `lake/augment.py` |
 | 自动沉淀 / 回填 | 每轮问答后台写入 question + retrieval + answer；「回填历史数据」把历史对话、知识库文档、长期记忆、黑板按 id 去重导入 | `app/services/lake_service.py` |
-| 湖检索 | 向量 + 全文（ICU 中文分词）+ RRF，SQL 预过滤（类型 / 会话 / 用户 / 知识库） | `lake/store.py::search` |
+| 湖检索 | 向量 + 全文（ICU 中文分词）+ RRF，LanceDB 先做结构化预过滤再算相似度：类型 / 会话 / 用户 / 知识库 / 最近 N 天 / 任意列的比较（`where`，只认列的比较与 AND / OR / LIKE / IN，拒绝子查询和函数） | `lake/store.py::search`、`lake/catalog.py::check_filter` |
 | 检索质量 / 知识缺口 | 检索耗时 p50 / p95、置信度分布、拒答率、反馈、被检索最多的文档、策略对比；没检索到 / 低置信 / 拒答 / 点踩 / 失败的问题列为缺口 | `lake/analytics.py` |
 | 缺口复测 | 湖里记录的是历史：补了语料后，把未解决的缺口（可选：当时检索分 < 0.3 的问题）拿到现在的知识库重新检索并生成回答，按 已解决 / 有改善 / 仍是缺口 记成 `retest` 记录；之后的缺口统计以最新复测为准（检索到但回答仍拒答不算解决）。知识缺口页「复测缺口」，分析智能体工具 `retest_gaps` | `lake/retest.py` |
 | 文档变更记录 | 上传解析 / 校对回灌 / 重新解析（保留或放弃校对）/ 恢复校对版 / 删除各写一条 `doc_event`（行级变化摘要），文档快照随之更新；整库重建等系统动作只在正文真的变了时记录。缺口会列出发生之后同一知识库里变更过的文档 | `lake/changes.py` |
 | 问题主题 | 问题向量余弦 k-means + c-TF-IDF 主题词，按主题看缺口率；可把主题写成派生列 `topic` | `lake/analytics.py::topics` |
 | 只读 SQL | DuckDB 直接查 Arrow（表名 `lake`），禁用外部文件访问，只允许单条 SELECT / WITH | `lake/analytics.py::run_sql` |
-| 分析智能体 | 自然语言提问 → 模型规划工具（概况 / 检索质量 / 缺口 / 主题 / SQL / 检索）→ 汇总结论；SQL 报错交给模型改一次；没有模型时按关键词路由 + 模板结论。每次分析和工具调用也写回湖里 | `lake/agent.py` |
+| 湖目录 | 让智能体先"理解数据"再查数据（思路来自火山引擎 LAS 的 Lance 数据检索 Agent）：列（类型 / 说明 / 真实取值）、meta JSON 里按 kind 出现的键与 `json_extract_string` 写法、指标口径（拒答率 / 低置信率 / 缺口率 / 延迟分位 / 点踩率 / 策略对比 / 热门文档 / 追问率，各带固定 SQL）、问题 → SQL 示例（内置 + 湖里以前分析成功的 SQL）。人工维护的指标 / 示例 / 列备注存在湖里（`agent = catalog` 的 note 记录，跟版本走；带 SQL 的保存前先在湖上试跑），分析时最优先采用。每条配向量，按意图检索；`GET/POST /api/v1/lake/catalog`，SQL 页右侧可点选填入、添加、删除 | `lake/catalog.py` |
+| 分析智能体 | 自然语言提问 → 目录发现（只把相关的列 / 键 / 口径 / 示例喂给模型）→ 按"决策罗盘"规划工具（目录 / 概况 / 检索质量 / 缺口 / 复测 / 路由 / 主题 / SQL / 检索）→ 执行 → 模型看结果反思，不够就追加调用（ReAct，总步数 ≤ `lake.agent_max_steps`；结果为空不许只改引号重试）→ 汇总结论（写明口径与样本数，相关 ≠ 因果）。SQL 报错交给模型改一次；`search` 可叠加结构化过滤（`days` / `where`，LanceDB 先过滤再算相似度）；没有模型时按关键词路由 + 模板结论。每次分析和工具调用也写回湖里，成为下一次的 Few-Shot | `lake/agent.py` |
 | 版本 / Tag / 分支 / 派生列 | 每次写入是一个版本，可在任意版本 / Tag / 分支上分析；派生列按主键追加（表达式用 DuckDB 求值），先在分支上验证、对比，再合并回主表 | `lake/store.py` |
 
 ```
@@ -290,7 +291,8 @@ mineru-kit models verify                      # 检查本机模型是否齐全
 | --- | --- |
 | 数字 PDF / Office 快速建索引 | `parsing.mineru.tier: flash`（默认；只用版面 + OCR 小模型，CPU 即可） |
 | 扫描件 / 表格 / 公式 | `basic`（ONNX / Torch 小模型，CPU 可跑）或 `standard`（+ VLM） |
-| 集群部署 | `mineru-kit api-server --tier standard`，然后填 `parsing.mineru.api_url` |
+| 集群部署 | `mineru-kit api-server --tier standard`，然后 `parsing.mineru.mode: server` 并填 `parsing.mineru.api_url` |
+| 机器内存小 / 没有 GPU，又要 standard 质量 | 云端 API：`parsing.mineru.mode: cloud`（策略配置 → 文档解析 →「解析方式」）。文档上传到 mineru.net 解析，本机不需要模型包；密钥填 `parsing.mineru.cloud.api_key` 或环境变量 `MINERU_API_KEY`，不填则匿名调用（有页数 / 频率限制）。云端目前只提供 `standard` 档，选了其他档位会自动改用它；云端连不上时有内置解析器的格式自动降级 |
 | 跨页表格 / 段落续接 / 全文标题层级 / 图文关联 | MinerU-Popo：知识库页对 PDF 点「Popo」→ 导出输入 → `scripts/run_popo.sh` → 打开 `parsing.popo.enabled` → 重新解析 |
 
 未安装 MinerU 时自动使用内置解析器（pdfplumber / python-docx / python-pptx）；Markdown 永远直解析，Excel / CSV 永远走行级结构化。
