@@ -200,7 +200,8 @@ def test_analyst_rule_and_llm(tmp_path: Path):
     out = LakeAnalyst(lake, None).run("最近哪些问题没答上来？")
     assert out["planner"] == "rule" and out["steps"][0]["tool"] == "knowledge_gaps" and "出差住酒店" in out["answer"]
     rec = lake.get(out["recordId"])
-    assert rec["kind"] == "analysis" and lake.list(where=lake.where_clause(kinds=["tool_call"], parent_ids=[out["recordId"]]))[1] == 1
+    # 工具调用也写回湖里（缺口 + 命中"没答"关键词的拒答率口径 SQL）
+    assert rec["kind"] == "analysis" and lake.list(where=lake.where_clause(kinds=["tool_call"], parent_ids=[out["recordId"]]))[1] == len(out["steps"]) >= 1
 
     def responder(prompt: str) -> str:
         if prompt.startswith("用户问题："):
@@ -259,10 +260,27 @@ def test_lake_api(client):
     assert client.get("/api/v1/lake/quality").json()["gapCount"] >= 3
     r = client.post("/api/v1/lake/search", json={"query": "报销", "kinds": ["question"], "topK": 3}).json()
     assert r and r[0]["kind"] == "question"
+    # 结构化预过滤：where 只认列的比较；days 限制时间窗
+    r = client.post("/api/v1/lake/search", json={"query": "报销", "kinds": ["answer"], "where": "status = 'refused'", "topK": 5}).json()
+    assert r and all(h["status"] == "refused" for h in r)
+    assert client.post("/api/v1/lake/search", json={"query": "报销", "where": "status = (SELECT 1)"}).status_code == 400
+    assert client.post("/api/v1/lake/search", json={"query": "报销", "days": 0.00001}).json() == []
     assert client.post("/api/v1/lake/sql", json={"sql": "select count(*) n from lake"}).json()["rows"][0][0] >= 18
     assert client.post("/api/v1/lake/sql", json={"sql": "drop table lake"}).status_code == 400
     assert client.post("/api/v1/lake/feedback", json={"answerId": "a0", "value": 1}).json()["ok"]
     assert client.post("/api/v1/lake/feedback", json={"answerId": "nope", "value": 1}).status_code == 404
+    # 湖目录：按意图检索 + 人工条目（带 SQL 的保存前试跑，跑不通 400）
+    cat = client.get("/api/v1/lake/catalog", params={"q": "拒答"}).json()
+    assert any(m["name"] == "拒答率" for m in cat["metrics"]) and cat["totals"]["column"] >= 10
+    assert client.post("/api/v1/lake/catalog", json={"type": "metric", "name": "坏指标", "sql": "SELECT nope FROM lake"}).status_code == 400
+    assert client.post("/api/v1/lake/catalog", json={"type": "column", "column": "no_such_col", "note": "x"}).status_code == 400
+    r = client.post("/api/v1/lake/catalog", json={"type": "example", "name": "最近被点踩的回答", "sql": "SELECT content FROM lake WHERE kind = 'answer' AND feedback < 0"}).json()
+    assert r["inserted"] == 1
+    cat = client.get("/api/v1/lake/catalog", params={"q": "点踩"}).json()
+    custom = [e for e in cat["examples"] if e["source"] == "custom"]
+    assert custom and custom[0]["id"] and len(cat["custom"]) == 1
+    assert client.delete(f"/api/v1/lake/records/{custom[0]['id']}").json()["deleted"] == [custom[0]["id"]]
+    assert client.get("/api/v1/lake/catalog").json()["custom"] == []
     assert client.post("/api/v1/lake/tags", json={"name": "t1"}).status_code == 200
     assert client.post("/api/v1/lake/branches", json={"name": "b1", "fromTag": "t1"}).status_code == 200
     t = client.post("/api/v1/lake/topics", json={"k": 2, "writeColumn": "topic", "branch": "b1"}).json()
@@ -398,6 +416,15 @@ def test_weak_question_answerable_with_low_score():
     assert classify(weak, {**ok, "score": 0.01}, low_score=0.05, weak_score=0.3) == "still_gap"         # 低于判定阈值：等于没检索到
 
 
+def test_catalog_labels_kb_ids_with_names_and_search_filters(tmp_path: Path):
+    lake = _lake(tmp_path)
+    _seed(lake)
+    a = LakeAnalyst(lake, None, kb_info_fn=lambda: [{"kbId": "kb1", "name": "人事制度库", "description": "", "category": "", "docCount": 1, "documents": [], "updatedAt": None}])
+    kb = next(e for e in a.catalog().entries if e["kind"] == "column" and e["name"] == "kb_id")
+    assert kb["samples"] == ["kb1＝人事制度库（18）"]          # 取值旁标注知识库名；SQL 仍用 id
+    assert any(c["name"] == "kb_id" for c in a.discover("人事制度库里的问题")["columns"])   # 问题里提到库名也能命中这一列
+
+
 def test_routing_tool_and_kb_profiles(tmp_path: Path):
     """路由工具：兜底次数与明细；"答案在其它知识库"的问题之后再问是否已答对；知识库画像由调用方提供。"""
     from prism.lake import run_retest
@@ -431,3 +458,151 @@ def test_routing_tool_and_kb_profiles(tmp_path: Path):
     assert [s["tool"] for s in out["steps"]][:2] == ["routing", "kb_profiles"]
     with pytest.raises(ValueError):
         LakeAnalyst(lake, None).call("kb_profiles", {})
+
+
+# ---------------------------------------------------------------------- 湖目录与 ReAct 分析
+def test_catalog_discovers_columns_meta_metrics_and_examples(tmp_path: Path):
+    from prism.lake.catalog import LakeCatalog, check_filter
+
+    lake = _lake(tmp_path)
+    _seed(lake)
+    a = LakeAnalyst(lake, None)
+    cat = a.catalog()
+    kinds = {e["kind"] for e in cat.entries}
+    assert kinds == {"column", "meta", "metric", "example"}
+    # 列：低基数列列出真实取值和计数；数值列给范围
+    status = next(e for e in cat.entries if e["kind"] == "column" and e["name"] == "status")
+    assert any(x.startswith("refused（") for x in status["samples"]) and "ok（" in " ".join(status["samples"])
+    score = next(e for e in cat.entries if e["kind"] == "column" and e["name"] == "score")
+    assert score["range"] and score["range"].startswith("0.01 ~ 0.82")
+    # meta：按 kind 发现键，带 SQL 写法
+    strategy = next(e for e in cat.entries if e["kind"] == "meta" and e["name"] == "$.strategy")
+    assert strategy["recordKind"] == "retrieval" and "hybrid" in strategy["samples"] and "json_extract_string(meta, '$.strategy')" in strategy["access"]
+    assert any(e["name"] == "$.contexts[*].fileName" and "unnest" in e["access"] for e in cat.entries if e["kind"] == "meta")
+
+    # 按意图检索：问延迟就挑到 latency_ms 列和"检索延迟分位"口径；kind / parent_id 始终带上
+    found = a.discover("最近检索延迟怎么样，p95 多少")
+    cols = [c["name"] for c in found["columns"]]
+    assert "latency_ms" in cols and "kind" in cols and "parent_id" in cols
+    assert any(m["name"] == "检索延迟分位" for m in found["metrics"])
+    doc = LakeCatalog.prompt_doc(found)
+    assert "latency_ms" in doc and "quantile_cont" in doc and "问题 → SQL 示例" in doc
+
+    # 口径 SQL 真能跑：每条指标在 DuckDB 上执行通过
+    for m in cat.entries:
+        if m["kind"] == "metric":
+            r = analytics.run_sql({"lake": lake.to_arrow()}, m["sql"])
+            assert r["columns"], m["name"]
+    assert analytics.run_sql({"lake": lake.to_arrow()}, next(m for m in cat.entries if m["name"] == "拒答率")["sql"])["rows"][0][0] == round(100 * 2 / 6, 1)
+
+    # 结构化过滤：只认列名和比较 / 逻辑，不许子查询和函数
+    cols_all = [c["name"] for c in a._columns()]
+    assert check_filter("kb_id = 'kb1' AND status <> 'ok'", cols_all) == "kb_id = 'kb1' AND status <> 'ok'"
+    for bad in ("kb_id = (SELECT 1)", "lower(kb_id) = 'x'", "foo = 1", "kb_id = 'a'; DROP TABLE lake"):
+        with pytest.raises(ValueError):
+            check_filter(bad, cols_all)
+
+
+def test_search_tool_applies_days_and_where_filters(tmp_path: Path):
+    lake = _lake(tmp_path)
+    _seed(lake)
+    a = LakeAnalyst(lake, None)
+    hits = a.call("search", {"query": "住宿 报销", "kinds": ["answer"], "where": "status = 'refused'", "top_k": 5})
+    assert hits and all(h["status"] == "refused" for h in hits) and all(h["kind"] == "answer" for h in hits)
+    assert a.call("search", {"query": "年假", "days": 0.0001}) == []            # 时间窗之外什么都不返回
+    with pytest.raises(ValueError):
+        a.call("search", {"query": "年假", "where": "status = (SELECT 1)"})
+
+
+def test_analyst_reflects_and_learns_examples_from_history(tmp_path: Path):
+    lake = _lake(tmp_path)
+    _seed(lake)
+    prompts: list[str] = []
+
+    def responder(prompt: str) -> str:
+        prompts.append(prompt)
+        if prompt.startswith("用户问题：") and "已执行的工具" in prompt:
+            # 反思：第一轮看到问题数后追加一条按天统计；第二轮够了
+            if "SELECT day" in prompt:
+                return json.dumps({"done": True})
+            return json.dumps({"steps": [{"tool": "sql", "args": {"query": "SELECT day, count(*) AS n FROM lake WHERE kind = 'question' GROUP BY day ORDER BY day"}, "why": "还缺按天的分布"},
+                                         {"tool": "sql", "args": {"query": "SELECT count(*) AS n FROM lake WHERE kind = 'question'"}, "why": "重复的调用应被去掉"}]})
+        if prompt.startswith("用户问题："):
+            return "结论：共 6 个问题。"
+        return json.dumps({"steps": [{"tool": "sql", "args": {"query": "SELECT count(*) AS n FROM lake WHERE kind = 'question'"}, "why": "先数总量"}]})
+
+    systems: list[str] = []
+
+    class CapturingLLM(FakeLLM):
+        def chat(self, messages, *, system=None, max_tokens=None, thinking=None):
+            systems.append(system or "")
+            return super().chat(messages, system=system, max_tokens=max_tokens, thinking=thinking)
+
+    llm = CapturingLLM(responder)
+    out = LakeAnalyst(lake, llm).run("每天有多少提问？")
+    assert out["planner"] == "llm" and out["rounds"] == 2 and [s["tool"] for s in out["steps"]] == ["sql", "sql"]
+    assert out["steps"][0]["rows"] == 1 and out["steps"][1]["rows"] >= 1 and not out["steps"][1]["empty"]
+    assert sum(r[1] for r in out["steps"][1]["result"]["rows"]) == 6          # 种子数据都在最近几小时，按天分组是 1~2 行
+    assert out["catalog"] and any(c["name"] == "day" for c in out["catalog"]["columns"]) and out["answer"].startswith("结论")
+    # 规划提示词里带了目录（相关列 + 口径 + 示例）和决策罗盘，而不是整张表的说明
+    plan_system = [c for c in systems if "决策罗盘" in c]
+    assert plan_system and "每日提问量" in plan_system[0] and "问题 → SQL 示例" in plan_system[0]
+    rec = lake.get(out["recordId"])
+    assert json.loads(rec["meta"])["rounds"] == 2 and json.loads(rec["meta"])["catalogHits"]["columns"] >= 2
+
+    # 这次分析成功的 SQL 成为下一次相似问题的示例（历史查询记录 = Few-Shot）
+    found = LakeAnalyst(lake, None).discover("每天的提问量")
+    history = [e for e in found["examples"] if e["source"] == "history"]
+    assert history and any("SELECT day" in e["sql"] for e in history) and all(e["name"].startswith("每天有多少提问") for e in history)
+
+    # 反思关掉：只执行规划的一轮
+    from prism.config import LakeConfig
+    out2 = LakeAnalyst(lake, FakeLLM(responder), LakeConfig(agent_reflect=False)).run("每天有多少提问？", record=False)
+    assert out2["rounds"] == 1 and len(out2["steps"]) == 1
+
+
+def test_analyst_marks_empty_results_and_rule_routes_catalog(tmp_path: Path):
+    lake = _lake(tmp_path)
+    _seed(lake)
+    out = LakeAnalyst(lake, None).run("meta 里有哪些字段，口径怎么算？", record=False)
+    assert out["steps"][0]["tool"] == "catalog" and "湖目录" in out["answer"] and "拒答率" in out["answer"]
+    # 没有模型时，问到指标就直接跑目录里的固定口径 SQL，模板结论给出数值
+    out = LakeAnalyst(lake, None).run("拒答率是多少？", record=False)
+    sql_steps = [s for s in out["steps"] if s["tool"] == "sql"]
+    assert sql_steps and sql_steps[0]["why"].startswith("指标口径：拒答率") and sql_steps[0]["result"]["rows"][0][0] == 33.3
+    assert "**拒答率**：refusal_rate_pct = 33.3，answers = 6" in out["answer"]
+    step = LakeAnalyst(lake, None)._execute("x", {"tool": "sql", "args": {"query": "SELECT * FROM lake WHERE kind = 'nothing'"}})
+    assert step["empty"] is True and step["rows"] == 0
+
+
+def test_custom_catalog_entries_live_in_the_lake(tmp_path: Path):
+    from prism.lake.catalog import custom_entries, custom_record
+
+    lake = _lake(tmp_path)
+    _seed(lake)
+    # 自定义指标 / 示例 / 列备注都是 agent = catalog 的 note 记录
+    lake.append([custom_record({"type": "metric", "name": "年假问题占比", "unit": "%", "definition": "问题里含「年假」的占全部问题的比例",
+                                "sql": "SELECT round(100.0 * count(*) FILTER (WHERE content LIKE '%年假%') / count(*), 1) AS pct FROM lake WHERE kind = 'question'"}),
+                 custom_record({"type": "example", "name": "被点踩的回答有哪些", "sql": "SELECT content FROM lake WHERE kind = 'answer' AND feedback < 0"}),
+                 custom_record({"type": "column", "column": "score", "note": "低于 0.05 基本是无关；同义改写的相关段落也可能只有 0.1"})])
+    custom = custom_entries(lake)
+    assert {c["type"] for c in custom} == {"metric", "example", "column"}
+    a = LakeAnalyst(lake, None)
+    cat = a.catalog()
+    m = next(e for e in cat.entries if e["kind"] == "metric" and e["name"] == "年假问题占比")
+    assert m["source"] == "custom" and m["id"] and "LIKE '%年假%'" in m["sql"]
+    assert any(e["kind"] == "example" and e["source"] == "custom" and e["name"] == "被点踩的回答有哪些" for e in cat.entries)
+    score = next(e for e in cat.entries if e["kind"] == "column" and e["name"] == "score")
+    assert "同义改写" in score["description"] and score["notes"]
+    # 问到自定义指标：无模型也直接跑它的 SQL；发现结果里 custom 列表带 id，可删
+    out = a.run("年假问题占比是多少", record=False)
+    sql_steps = [s for s in out["steps"] if s["tool"] == "sql"]
+    assert sql_steps and sql_steps[0]["why"].startswith("指标口径：年假问题占比") and sql_steps[0]["result"]["rows"][0][0] == 33.3
+    found = a.discover("年假")
+    assert any(m["source"] == "custom" for m in found["metrics"]) and len(found["custom"]) == 3
+    lake.delete_records([found["custom"][0]["id"]])
+    assert len(custom_entries(lake)) == 2
+    # 表单校验
+    for bad in ({"type": "metric", "name": "x"}, {"type": "column", "column": "score"}, {"type": "oops", "name": "x", "sql": "select 1"}):
+        with pytest.raises(ValueError):
+            custom_record(bad)

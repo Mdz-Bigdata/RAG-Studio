@@ -360,14 +360,17 @@ def run_sql(tables: dict[str, Any], sql: str, *, limit: int = 500) -> dict[str, 
     return {"columns": cols, "rows": [[_jsonable(v) for v in r] for r in rows[:limit]], "rowCount": min(len(rows), limit), "truncated": truncated, "elapsedMs": round(ms, 1)}
 
 
+# 列说明：schema_doc（整表）和 catalog（按意图挑列）共用
+COLUMN_DOCS = {
+    "id": "主键", "kind": "类型：question 问题 / retrieval 检索日志 / answer 回答 / analysis 湖分析 / tool_call 工具调用 / memory 长期记忆 / board 智能体黑板 / document 文档 / doc_event 文档变更 / retest 复测 / note 笔记",
+    "session_id": "会话 id", "user_id": "用户", "agent": "产生这条记录的智能体", "kb_id": "知识库 id（SQL 里按 id 过滤，取值旁 ＝ 后面是知识库名）", "title": "标题（retrieval / answer 是问题原文；tool_call 是工具名）", "content": "正文",
+    "meta": "JSON 元数据（retrieval: strategy / queries / contexts[{docId,fileName,score}] / timingsMs；answer: model / citations；tool_call: args / why）",
+    "refs": "JSON 数组：引用的文档 id（answer）或关联记录 id", "parent_id": "父记录：retrieval / answer / retest 的 parent_id 指向 question，tool_call 指向 analysis",
+    "status": "ok / no_context（没检索到）/ refused（拒答）/ error", "score": "retrieval：最终上下文的最高分（重排分，无关 < 0.01）",
+    "latency_ms": "耗时毫秒", "feedback": "回答反馈：1 赞 / -1 踩 / 0 无", "ts": "Unix 时间戳（秒）", "day": "日期 YYYY-MM-DD", "embed_model": "向量模型",
+}
+
+
 def schema_doc(columns: list[dict[str, str]]) -> str:
     """给分析智能体 / 前端看的表结构说明。"""
-    desc = {
-        "id": "主键", "kind": "类型：question 问题 / retrieval 检索日志 / answer 回答 / analysis 湖分析 / tool_call 工具调用 / memory 长期记忆 / board 智能体黑板 / document 文档 / note 笔记",
-        "session_id": "会话 id", "user_id": "用户", "agent": "产生这条记录的智能体", "kb_id": "知识库 id", "title": "标题", "content": "正文",
-        "meta": "JSON 元数据（retrieval: strategy / queries / contexts[{docId,fileName,score}] / timingsMs；answer: model / citations）",
-        "refs": "JSON 数组：引用的文档 id（answer）或关联记录 id", "parent_id": "父记录：retrieval / answer 的 parent_id 指向 question",
-        "status": "ok / no_context（没检索到）/ refused（拒答）/ error", "score": "retrieval：最终上下文的最高分（重排分）",
-        "latency_ms": "耗时毫秒", "feedback": "回答反馈：1 赞 / -1 踩 / 0 无", "ts": "Unix 时间戳（秒）", "day": "日期 YYYY-MM-DD", "embed_model": "向量模型",
-    }
-    return "\n".join(f"- {c['name']} ({c['type']}): {desc.get(c['name'], '派生列')}" for c in columns)
+    return "\n".join(f"- {c['name']} ({c['type']}): {COLUMN_DOCS.get(c['name'], '派生列')}" for c in columns)

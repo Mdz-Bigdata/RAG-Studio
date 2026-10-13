@@ -314,6 +314,41 @@ class LakeService:
         cols = [{"name": f.name, "type": str(f.type)} for f in (view.schema if view is not None else []) if f.name != "vector"]
         return {"columns": cols, "doc": analytics.schema_doc(cols)}
 
+    def search(self, query: str, *, top_k: int = 10, mode: str = "hybrid", kinds=None, session_id=None, user_id=None, kb_id=None,
+               days: float | None = None, where: str | None = None, version=None, branch=None) -> list[dict[str, Any]]:
+        """湖检索：语义 + 全文 RRF，叠加结构化预过滤（类型 / 会话 / 用户 / 知识库 / 最近 N 天 / 任意列的比较）。"""
+        from prism.lake.catalog import check_filter
+
+        lake = self.lake()
+        view = lake.view(version=version, branch=branch)
+        extra = []
+        if days:
+            extra.append(f"ts >= {time.time() - float(days) * 86400:.0f}")
+        if where:
+            extra.append(check_filter(where, [f.name for f in (view.schema if view is not None else [])]))
+        clause = lake.where_clause(kinds=kinds, session_id=session_id, user_id=user_id, kb_id=kb_id, extra=" AND ".join(f"({x})" for x in extra) or None)
+        return lake.search(query, top_k=top_k, mode=mode, where=clause, view=view)
+
+    def catalog(self, intent: str = "", version=None, branch=None) -> dict[str, Any]:
+        """湖目录：按意图挑相关的列 / meta 键 / 指标口径 / 示例 SQL（含湖里以前分析成功的 SQL）；意图为空给每类的前几条。"""
+        analyst = LakeAnalyst(self.lake(), None, self.cfg(), version=version, branch=branch, kb_info_fn=self.kb_profiles)
+        return analyst.discover(intent or "")
+
+    def catalog_add(self, entry: dict[str, Any], *, user_id: str = "default") -> dict[str, Any]:
+        """新增人工维护的目录条目（指标 / 示例 / 列备注）。带 SQL 的先在当前湖上试跑，跑不通不收。"""
+        from prism.lake.catalog import custom_record
+
+        rec = custom_record(entry, user_id=user_id)
+        lake = self.lake()
+        if rec["meta"].get("sql"):
+            analytics.run_sql({"lake": lake.to_arrow()}, rec["meta"]["sql"], limit=5)        # check_sql + 真跑：语法 / 列名错在这里就报
+        if entry.get("type") == "column":
+            cols = {f.name for f in (lake.view().schema if lake.view() is not None else [])}
+            if cols and rec["meta"]["column"] not in cols:
+                raise ValueError(f"lake 里没有列 {rec['meta']['column']}")
+        out = lake.append([rec])
+        return {"inserted": out.get("inserted", 0), "entry": {**rec, "meta": rec["meta"]}}
+
     def analyze(self, question: str, *, version=None, branch=None, user_id: str = "default") -> dict[str, Any]:
         llm = model_service.llm(aux=True)
         # 复测只对主表最新版本有意义（要和现在的知识库比）；在历史版本 / 分支上分析时不提供

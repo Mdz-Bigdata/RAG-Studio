@@ -3,7 +3,8 @@
 
 from .agent import TOOLS, LakeAnalyst
 from .augment import format_experience, recall_experience
+from .catalog import EXAMPLES, METRICS, LakeCatalog, check_filter, learned_examples
 from .retest import STATUS_LABELS as RETEST_STATUS, run_retest
 from .store import BASE_COLUMNS, KIND_LABELS, KINDS, AgentLake
 
-__all__ = ["BASE_COLUMNS", "KINDS", "KIND_LABELS", "RETEST_STATUS", "TOOLS", "AgentLake", "LakeAnalyst", "format_experience", "recall_experience", "run_retest"]
+__all__ = ["BASE_COLUMNS", "EXAMPLES", "KINDS", "KIND_LABELS", "METRICS", "RETEST_STATUS", "TOOLS", "AgentLake", "LakeAnalyst", "LakeCatalog", "check_filter", "format_experience", "learned_examples", "recall_experience", "run_retest"]

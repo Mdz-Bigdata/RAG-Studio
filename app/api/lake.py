@@ -27,6 +27,8 @@ class SearchBody(BaseModel):
     sessionId: str | None = None
     userId: str | None = None
     kbId: str | None = None
+    days: float | None = Field(None, gt=0)      # 只看最近 N 天
+    where: str | None = None                    # 结构化过滤片段（列的比较 / AND / OR / LIKE / IN / IS NULL），LanceDB 先过滤再算相似度
     version: str | None = None
     branch: str | None = None
 
@@ -78,6 +80,17 @@ class NoteBody(BaseModel):
     content: str
     title: str = ""
     kbId: str | None = None
+    userId: str = "default"
+
+
+class CatalogEntryBody(BaseModel):
+    type: Literal["metric", "example", "column"]
+    name: str = ""                       # 指标名 / 示例问题
+    sql: str = ""                        # metric / example
+    definition: str = ""                 # metric：口径说明
+    unit: str = ""                       # metric
+    column: str = ""                     # column：列名
+    note: str = ""                       # column：备注
     userId: str = "default"
 
 
@@ -169,10 +182,9 @@ def add_note(body: NoteBody):
 
 @router.post("/search")
 def search(body: SearchBody):
-    lake = lake_service.lake()
-    where = lake.where_clause(kinds=body.kinds, session_id=body.sessionId, user_id=body.userId, kb_id=body.kbId)
     try:
-        return lake.search(body.query, top_k=body.topK, mode=body.mode, where=where, view=lake.view(version=body.version, branch=body.branch))
+        return lake_service.search(body.query, top_k=body.topK, mode=body.mode, kinds=body.kinds, session_id=body.sessionId, user_id=body.userId, kb_id=body.kbId,
+                                   days=body.days, where=body.where, version=body.version, branch=body.branch)
     except Exception as exc:
         raise _err(exc) from exc
 
@@ -193,6 +205,24 @@ def topics(body: TopicsBody):
 @router.get("/schema")
 def schema(version: str | None = None, branch: str | None = None):
     return lake_service.schema(version, branch)
+
+
+@router.get("/catalog")
+def catalog(q: str = "", version: str | None = None, branch: str | None = None):
+    """湖目录（列 / meta 键 / 指标口径 / 示例 SQL）：q 为意图时按相关度挑，空则列出每类的前几条。"""
+    try:
+        return lake_service.catalog(q, version, branch)
+    except Exception as exc:
+        raise _err(exc) from exc
+
+
+@router.post("/catalog")
+def catalog_add(body: CatalogEntryBody):
+    """人工维护目录：自定义指标口径 / 问题 → SQL 示例 / 列备注，存成湖里 agent = catalog 的 note 记录；删除走 DELETE /records/{id}。"""
+    try:
+        return lake_service.catalog_add(body.model_dump(exclude={"userId"}), user_id=body.userId)
+    except Exception as exc:
+        raise _err(exc) from exc
 
 
 @router.post("/sql")

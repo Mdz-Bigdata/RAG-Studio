@@ -68,8 +68,17 @@ export interface LakeTopics {
 
 export interface SqlResult { columns: string[]; rows: unknown[][]; rowCount: number; truncated: boolean; elapsedMs: number }
 
-export interface AnalysisStep { tool: string; args: Record<string, unknown>; why: string; result: unknown; error: string | null; ms: number }
-export interface AnalysisResult { question: string; planner: 'llm' | 'rule'; summarizer: 'llm' | 'template'; steps: AnalysisStep[]; answer: string; elapsedMs: number; recordId?: string | null }
+export interface AnalysisStep { tool: string; args: Record<string, unknown>; why: string; result: unknown; error: string | null; empty?: boolean; rows?: number | null; ms: number }
+// 湖目录：列 / meta 键 / 指标口径 / 示例 SQL，按意图检索（分析智能体规划前先查，SQL 页右侧可点选）
+export interface CatalogColumn { kind: 'column'; name: string; type: string; description: string; samples: string[]; range: string | null; nulls: number | null; notes?: string[]; doc: string; relevance: number }
+export interface CatalogMeta { kind: 'meta'; name: string; recordKind: string; count: number; samples: string[]; access: string; doc: string; relevance: number }
+export interface CatalogMetric { kind: 'metric'; name: string; unit: string; definition: string; sql: string; source: 'builtin' | 'custom'; id?: string; doc: string; relevance: number }
+export interface CatalogExample { kind: 'example'; name: string; sql: string; source: 'builtin' | 'history' | 'custom'; id?: string; doc: string; relevance: number }
+// 人工维护的条目（湖里 agent = catalog 的 note 记录）：指标口径 / 示例 / 列备注
+export interface CatalogCustom { id: string; type: 'metric' | 'example' | 'column'; name: string; content: string; meta: Record<string, string>; day: string; user_id: string }
+export interface CatalogEntryInput { type: 'metric' | 'example' | 'column'; name?: string; sql?: string; definition?: string; unit?: string; column?: string; note?: string }
+export interface LakeCatalog { columns: CatalogColumn[]; metaKeys: CatalogMeta[]; metrics: CatalogMetric[]; examples: CatalogExample[]; totals: Record<string, number>; custom?: CatalogCustom[] }
+export interface AnalysisResult { question: string; planner: 'llm' | 'rule'; summarizer: 'llm' | 'template'; rounds?: number; steps: AnalysisStep[]; answer: string; elapsedMs: number; recordId?: string | null; catalog?: LakeCatalog | null }
 
 export interface LakeVersion { version: number; timestamp: string | null; metadata: Record<string, string>; tags: string[] }
 export interface LakeBranch { name: string; parentBranch: string; parentVersion: number | null; version: number; rows: number; derivedColumns: string[] }
@@ -104,11 +113,13 @@ export const lakeApi = {
     req<{ items: LakeRecord[]; total: number }>(`/records${qs(p as Record<string, string | number | null | undefined>)}`),
   record: (id: string) => req<{ record: LakeRecord; parent: LakeRecord | null; children: LakeRecord[] }>(`/records/${encodeURIComponent(id)}`),
   addNote: (content: string, title = '') => req<{ inserted: number }>('/records', post({ content, title })),
-  search: (body: { query: string; kinds?: string[] | null; mode?: 'hybrid' | 'vector' | 'fts'; topK?: number } & LakeRef) => req<LakeHit[]>('/search', post(body)),
+  search: (body: { query: string; kinds?: string[] | null; mode?: 'hybrid' | 'vector' | 'fts'; topK?: number; days?: number | null; where?: string | null } & LakeRef) => req<LakeHit[]>('/search', post(body)),
   topics: (body: { k?: number | null; writeColumn?: string | null } & LakeRef) => req<LakeTopics>('/topics', post(body)),
   schema: (ref: LakeRef = {}) => req<{ columns: { name: string; type: string }[]; doc: string }>(`/schema${qs({ version: ref.version, branch: ref.branch })}`),
   sql: (sql: string, ref: LakeRef = {}) => req<SqlResult>('/sql', post({ sql, ...ref })),
   analyze: (question: string, ref: LakeRef = {}) => req<AnalysisResult>('/analyze', post({ question, ...ref })),
+  catalog: (q: string, ref: LakeRef = {}) => req<LakeCatalog>(`/catalog${qs({ q: q || undefined, version: ref.version, branch: ref.branch })}`),
+  catalogAdd: (entry: CatalogEntryInput) => req<{ inserted: number }>('/catalog', post(entry)),
   retest: (body: { limit?: number; includeWeak?: boolean; checkAnswer?: boolean }) => req<RetestResponse>('/retest', post(body)),
   feedback: (answerId: string, value: -1 | 0 | 1) => req<{ ok: boolean }>('/feedback', post({ answerId, value })),
   sync: () => req<Record<string, { inserted: number; skipped: number }>>('/sync', post({})),

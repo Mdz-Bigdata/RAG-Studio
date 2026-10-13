@@ -8,6 +8,8 @@ from pathlib import Path
 from pydantic import BaseModel
 
 BASE_DIR = Path(__file__).resolve().parents[1]  # backend/
+# DATA_DIR：把数据目录（SQLite / 上传 / 索引 / LanceDB）整体指到别处，用于临时环境和联调，不碰真实数据
+DATA_DIR = Path(os.getenv("DATA_DIR") or BASE_DIR / "data").expanduser().resolve()
 
 
 def load_dotenv(path: Path) -> None:
@@ -32,11 +34,11 @@ class AppConfig(BaseModel):
     version: str = "0.2.0"
     api_prefix: str = "/api/v1"
     base_dir: Path = BASE_DIR
-    data_dir: Path = BASE_DIR / "data"
-    upload_dir: Path = BASE_DIR / "data" / "uploads"
-    index_root: Path = BASE_DIR / "data" / "indexes"
+    data_dir: Path = DATA_DIR
+    upload_dir: Path = DATA_DIR / "uploads"
+    index_root: Path = DATA_DIR / "indexes"
     config_yaml: Path = BASE_DIR / "config.yaml"
-    sqlite_url: str = os.getenv("SQLITE_URL", f"sqlite:///{BASE_DIR / 'data' / 'app.db'}")
+    sqlite_url: str = os.getenv("SQLITE_URL", f"sqlite:///{DATA_DIR / 'app.db'}")
     cors_origins: list[str] = ["*"]
 
     # 旧版 .env 兼容：无模型配置中心记录时的环境变量兜底

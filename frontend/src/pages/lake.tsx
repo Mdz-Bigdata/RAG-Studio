@@ -1,8 +1,8 @@
 // Agent 湖：问答链路沉淀出的上下文资产（问题 / 检索日志 / 回答 / 反馈 / 工具调用 / 记忆 / 黑板 / 文档）放在一张 LanceDB 宽表里，
 // 这里做湖分析（检索质量、知识缺口、主题、SQL、分析智能体），并管理版本 / Tag / 分支 / 派生列。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, Check, ChevronDown, ChevronLeft, ChevronRight, Database, Eye, EyeOff, GitBranch, GitMerge, History, Layers, Play, RefreshCw, Search, Sparkles, Tag, Terminal, Trash2, TriangleAlert, Waves, X } from 'lucide-react';
-import { KIND_LABEL, RETEST_LABEL, lakeApi, type AnalysisResult, type LakeGap, type RetestResponse, type RetestStatus, type BranchDiff, type LakeHit, type LakeKind, type LakeOverview, type LakeQuality, type LakeRecord, type LakeRef, type LakeTopics, type LakeVersions, type SqlResult } from '../api/lake';
+import { BookOpen, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, Database, Eye, EyeOff, GitBranch, GitMerge, History, Layers, Play, RefreshCw, Search, Sparkles, Tag, Terminal, Trash2, TriangleAlert, Waves, X } from 'lucide-react';
+import { KIND_LABEL, RETEST_LABEL, lakeApi, type AnalysisResult, type CatalogEntryInput, type LakeCatalog, type LakeGap, type RetestResponse, type RetestStatus, type BranchDiff, type LakeHit, type LakeKind, type LakeOverview, type LakeQuality, type LakeRecord, type LakeRef, type LakeTopics, type LakeVersions, type SqlResult } from '../api/lake';
 import { Markdown } from '../components/markdown';
 import { Badge, Button, Callout, Drawer, Empty, ScoreBar, Spinner, Tabs, confirmDialog } from '../components/ui';
 import { formatBytes } from '../lib/format';
@@ -22,7 +22,7 @@ const SQL_SAMPLES: { label: string; sql: string }[] = [
   { label: '拒答 / 被点踩的回答', sql: "SELECT a.day, q.content AS question, a.status, a.feedback\nFROM lake a JOIN lake q ON q.id = a.parent_id\nWHERE a.kind = 'answer' AND (a.status <> 'ok' OR a.feedback < 0)\nORDER BY a.ts DESC" },
   { label: '最慢的 10 次检索', sql: "SELECT day, title AS question, latency_ms, score FROM lake\nWHERE kind = 'retrieval' ORDER BY latency_ms DESC NULLS LAST LIMIT 10" },
 ];
-const AGENT_SAMPLES = ['最近哪些问题没答上来？该补什么语料？', '用户最关心哪些主题？', '检索延迟和置信度怎么样，哪种策略效果更好？', '每天有多少提问？趋势如何？'];
+const AGENT_SAMPLES = ['最近哪些问题没答上来？该补什么语料？', '用户最关心哪些主题？', '检索延迟和置信度怎么样，哪种策略效果更好？', '每天有多少提问？趋势如何？', '拒答率和点踩率各是多少，口径是什么？', '哪些文档被检索得最多？'];
 
 // ------------------------------------------------------------------ 小部件
 function KindBadge({ kind }: { kind: string }) {
@@ -59,6 +59,19 @@ function HBars({ items }: { items: { label: string; value: number; hint?: string
           <span className="small tnum" style={{ width: 44, textAlign: 'right' }}>{i.value}</span>
         </div>
       ))}
+    </div>
+  );
+}
+
+/** SQL 结果里有 day 列和一个数值列、且不止几行时，先画成每天的条形图，再给表。 */
+function SqlResultView({ columns, rows }: { columns: string[]; rows: unknown[][] }) {
+  const di = columns.findIndex((c) => c === 'day' || c === 'q.day' || c.endsWith('_day'));
+  const vi = di < 0 ? -1 : columns.findIndex((_, i) => i !== di && rows.every((r) => typeof r[i] === 'number' || r[i] === null));
+  const series = di >= 0 && vi >= 0 && rows.length >= 3 ? rows.map((r) => ({ day: String(r[di]), value: Number(r[vi] ?? 0) })).sort((a, b) => a.day.localeCompare(b.day)) : null;
+  return (
+    <div className="col gap-8">
+      {series ? <div className="card-body" style={{ paddingTop: 4, paddingBottom: 0 }}><DailyBars data={series} field={columns[vi]} /></div> : null}
+      <ResultTable columns={columns} rows={rows} />
     </div>
   );
 }
@@ -540,12 +553,14 @@ function SearchTab({ refv, onOpen, onDelete }: { refv: LakeRef; onOpen: (id: str
   const [query, setQuery] = useState('');
   const [mode, setMode] = useState<'hybrid' | 'vector' | 'fts'>('hybrid');
   const [kinds, setKinds] = useState<LakeKind[]>([]);
+  const [days, setDays] = useState('');
+  const [where, setWhere] = useState('');
   const [hits, setHits] = useState<LakeHit[] | null>(null);
   const [loading, setLoading] = useState(false);
   const run = async () => {
     if (!query.trim()) return;
     setLoading(true);
-    try { setHits(await lakeApi.search({ query, mode, kinds: kinds.length ? kinds : null, topK: 20, ...refv })); } catch (e) { toast(errMsg(e), 'bad'); } finally { setLoading(false); }
+    try { setHits(await lakeApi.search({ query, mode, kinds: kinds.length ? kinds : null, topK: 20, days: days ? Number(days) : null, where: where.trim() || null, ...refv })); } catch (e) { toast(errMsg(e), 'bad'); } finally { setLoading(false); }
   };
   const toggle = (k: LakeKind) => setKinds((ks) => (ks.includes(k) ? ks.filter((x) => x !== k) : [...ks, k]));
   return (
@@ -557,7 +572,11 @@ function SearchTab({ refv, onOpen, onDelete }: { refv: LakeRef; onOpen: (id: str
           <Button variant="primary" loading={loading} onClick={run}><Search size={13} />检索</Button>
         </div>
         <div className="row gap-6 wrap">{KINDS.map((k) => <button key={k} className={`badge ${kinds.includes(k) ? 'accent' : ''}`} style={{ cursor: 'pointer' }} onClick={() => toggle(k)}>{KIND_LABEL[k]}</button>)}<span className="xs faint">不选 = 全部类型</span></div>
-        <div className="xs faint">智能问答里的「历史问答参考」就是用同一张表召回的：只取与当前问题相似度 ≥ 阈值、状态正常且没被点踩的历史回答，作为参考信息（不可引用）交给回答模型。</div>
+        <div className="row gap-8 wrap">
+          <label className="row gap-6 xs">最近<input type="number" min={1} value={days} placeholder="全部" style={{ width: 70 }} onChange={(e) => setDays(e.target.value)} />天</label>
+          <input className="mono flex-1" value={where} placeholder="结构化过滤，例如 status = 'refused' AND feedback < 0（只认列的比较 / AND / OR / LIKE / IN）" style={{ minWidth: 320 }} onChange={(e) => setWhere(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && run()} />
+        </div>
+        <div className="xs faint">结构化条件在 LanceDB 里先过滤再算相似度（混合检索 = 结构化过滤 + 向量 / 全文）。智能问答里的「历史问答参考」就是用同一张表召回的：只取与当前问题相似度 ≥ 阈值、状态正常且没被点踩的历史回答，作为参考信息（不可引用）交给回答模型。</div>
       </div></div>
       {hits ? (hits.length ? (
         <div className="card">{hits.map((h) => (
@@ -575,19 +594,102 @@ function SearchTab({ refv, onOpen, onDelete }: { refv: LakeRef; onOpen: (id: str
   );
 }
 
+/** 湖目录：按意图找相关的列 / meta 键 / 指标口径 / 示例 SQL。onPick：把一条 SQL 填进编辑器。 */
+function CatalogPanel({ catalog, onPick, compact, onChanged }: { catalog: LakeCatalog | null; onPick?: (sql: string) => void; compact?: boolean; onChanged?: () => void }) {
+  const { toast } = useApp();
+  const [tab, setTab] = useState<'columns' | 'metaKeys' | 'metrics' | 'examples'>('columns');
+  const [adding, setAdding] = useState(false);
+  const [form, setForm] = useState<CatalogEntryInput>({ type: 'metric', name: '', sql: '', definition: '', unit: '', column: '', note: '' });
+  const [saving, setSaving] = useState(false);
+  const removeCustom = async (id: string, label: string) => {
+    if (!confirmDialog(`删除目录条目「${label}」？`)) return;
+    try { await lakeApi.deleteRecord(id, { cascade: false }); toast('已删除', 'ok'); onChanged?.(); } catch (e) { toast(errMsg(e), 'bad'); }
+  };
+  const save = async () => {
+    setSaving(true);
+    try { await lakeApi.catalogAdd(form); toast('已加入目录（带 SQL 的已在当前湖上试跑通过）', 'ok'); setAdding(false); setForm({ type: form.type, name: '', sql: '', definition: '', unit: '', column: '', note: '' }); onChanged?.(); } catch (e) { toast(errMsg(e), 'bad'); } finally { setSaving(false); }
+  };
+  if (!catalog) return <Spinner />;
+  const customBadge = (id?: string, source?: string, label = '') => source === 'custom' && id && onChanged
+    ? <span className="row gap-4"><Badge tone="accent">人工</Badge><button type="button" className="btn ghost xs" title="删除" onClick={() => removeCustom(id, label)}><X size={11} /></button></span>
+    : null;
+  const sections: { key: typeof tab; label: string; n: number }[] = [
+    { key: 'columns', label: '列', n: catalog.columns.length }, { key: 'metaKeys', label: 'meta 键', n: catalog.metaKeys.length },
+    { key: 'metrics', label: '指标口径', n: catalog.metrics.length }, { key: 'examples', label: '示例', n: catalog.examples.length },
+  ];
+  const pick = (sql: string) => onPick?.(sql);
+  return (
+    <div className="col gap-8">
+      <div className="row gap-6 wrap">{sections.map((sec) => <button key={sec.key} className={`badge ${tab === sec.key ? 'accent' : ''}`} style={{ cursor: 'pointer' }} onClick={() => setTab(sec.key)}>{sec.label} {sec.n}</button>)}</div>
+      {tab === 'columns' ? catalog.columns.map((c) => (
+        <div key={c.name} className="col gap-2 xs" style={{ borderBottom: '1px solid var(--border)', paddingBottom: 6 }}>
+          <div className="row between"><span className="mono">{c.name}</span><span className="faint">{c.type}</span></div>
+          <div className="muted">{c.description}</div>
+          {c.samples.length ? <div className="faint clamp-2">取值：{c.samples.join(' / ')}</div> : null}
+          {c.range ? <div className="faint">范围：{c.range}</div> : null}
+          {c.notes?.length && onChanged ? c.notes.map((n, i) => { const rec = catalog.custom?.find((x) => x.type === 'column' && x.meta.column === c.name && x.content === n); return <div key={i} className="row between gap-6"><span className="muted">备注：{n}</span>{rec ? <button type="button" className="btn ghost xs" title="删除备注" onClick={() => removeCustom(rec.id, `${c.name} 的备注`)}><X size={11} /></button> : null}</div>; }) : null}
+        </div>
+      )) : null}
+      {onChanged ? (adding ? (
+        <div className="col gap-6 xs" style={{ borderTop: '1px solid var(--border)', paddingTop: 8 }}>
+          <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value as CatalogEntryInput['type'] })}><option value="metric">指标口径</option><option value="example">问题 → SQL 示例</option><option value="column">列备注</option></select>
+          {form.type === 'column' ? (
+            <>
+              <select value={form.column} onChange={(e) => setForm({ ...form, column: e.target.value })}><option value="">选择列…</option>{catalog.columns.map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}</select>
+              <textarea rows={2} value={form.note} placeholder="这列的业务含义、取值注意事项…" onChange={(e) => setForm({ ...form, note: e.target.value })} />
+            </>
+          ) : (
+            <>
+              <input value={form.name} placeholder={form.type === 'metric' ? '指标名，例如：年假问题占比' : '问题，例如：被点踩的回答有哪些'} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+              {form.type === 'metric' ? <div className="row gap-6"><input className="flex-1" value={form.definition} placeholder="口径说明（怎么算）" onChange={(e) => setForm({ ...form, definition: e.target.value })} /><input style={{ width: 60 }} value={form.unit} placeholder="单位" onChange={(e) => setForm({ ...form, unit: e.target.value })} /></div> : null}
+              <textarea className="mono" rows={3} value={form.sql} placeholder="SELECT … FROM lake WHERE kind = '…'" spellCheck={false} onChange={(e) => setForm({ ...form, sql: e.target.value })} />
+            </>
+          )}
+          <div className="row gap-6"><Button size="xs" variant="primary" loading={saving} onClick={save}>保存</Button><Button size="xs" onClick={() => setAdding(false)}>取消</Button><span className="faint">带 SQL 的条目保存前会在当前湖上试跑一遍</span></div>
+        </div>
+      ) : <div className="row between xs" style={{ borderTop: '1px solid var(--border)', paddingTop: 8 }}><span className="faint">人工条目存在湖里，跟着版本走，分析智能体优先采用</span><Button size="xs" onClick={() => setAdding(true)}>添加</Button></div>) : null}
+      {tab === 'metaKeys' ? (catalog.metaKeys.length ? catalog.metaKeys.map((m) => (
+        <div key={`${m.recordKind}:${m.name}`} className="col gap-2 xs" style={{ borderBottom: '1px solid var(--border)', paddingBottom: 6 }}>
+          <div className="row between gap-6"><span className="mono ellipsis">{m.name}</span><Badge tone="info">{KIND_LABEL[m.recordKind as LakeKind] ?? m.recordKind}</Badge></div>
+          {m.samples.length ? <div className="faint clamp-2">示例：{m.samples.join('、')}</div> : null}
+          <div className="mono faint clamp-2" title={m.access}>{m.access}</div>
+        </div>
+      )) : <Empty title="还没有 meta 数据" />) : null}
+      {tab === 'metrics' ? catalog.metrics.map((m) => (
+        <div key={m.name} className="col gap-2 xs" style={{ borderBottom: '1px solid var(--border)', paddingBottom: 6 }}>
+          <div className="row between gap-6"><b>{m.name}{m.unit ? `（${m.unit}）` : ''}</b><span className="row gap-4">{customBadge(m.id, m.source, m.name)}{onPick ? <button className="btn ghost xs" onClick={() => pick(m.sql)}>填入 SQL</button> : null}</span></div>
+          <div className="muted">{m.definition}</div>
+          {!compact ? <pre className="mono faint pre" style={{ margin: 0, maxHeight: 90, overflow: 'auto' }}>{m.sql}</pre> : null}
+        </div>
+      )) : null}
+      {tab === 'examples' ? catalog.examples.map((e, i) => (
+        <div key={i} className="col gap-2 xs" style={{ borderBottom: '1px solid var(--border)', paddingBottom: 6 }}>
+          <div className="row between gap-6"><span className="ellipsis">{e.name}</span><span className="row gap-4">{e.source === 'history' ? <Badge tone="ok">本库历史</Badge> : e.source === 'custom' ? customBadge(e.id, e.source, e.name) : <Badge>内置</Badge>}{onPick ? <button className="btn ghost xs" onClick={() => pick(e.sql)}>填入</button> : null}</span></div>
+          {!compact ? <pre className="mono faint pre" style={{ margin: 0, maxHeight: 90, overflow: 'auto' }}>{e.sql}</pre> : null}
+        </div>
+      )) : null}
+    </div>
+  );
+}
+
 function SqlTab({ refv }: { refv: LakeRef }) {
   const [sql, setSql] = useState(SQL_SAMPLES[0].sql);
   const [res, setRes] = useState<SqlResult | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [schema, setSchema] = useState<{ name: string; type: string }[]>([]);
-  useEffect(() => { lakeApi.schema(refv).then((s) => setSchema(s.columns)).catch(() => undefined); }, [refv]);
+  const [intent, setIntent] = useState('');
+  const [catalog, setCatalog] = useState<LakeCatalog | null>(null);
+  // 湖目录：不填意图时列出每类的前几条；填了按相关度挑（含湖里以前分析成功的 SQL）
+  useEffect(() => {
+    const t = window.setTimeout(() => { lakeApi.catalog(intent, refv).then(setCatalog).catch(() => setCatalog(null)); }, intent ? 300 : 0);
+    return () => window.clearTimeout(t);
+  }, [refv, intent]);
   const run = async () => {
     setLoading(true); setError('');
     try { setRes(await lakeApi.sql(sql, refv)); } catch (e) { setError(errMsg(e)); setRes(null); } finally { setLoading(false); }
   };
   return (
-    <div className="grid" style={{ gridTemplateColumns: 'minmax(0, 1fr) 260px', gap: 16 }}>
+    <div className="grid" style={{ gridTemplateColumns: 'minmax(0, 1fr) 320px', gap: 16 }}>
       <div className="col gap-12">
         <div className="card"><div className="card-body col gap-8">
           <div className="row gap-6 wrap">{SQL_SAMPLES.map((s) => <button key={s.label} className="badge" style={{ cursor: 'pointer' }} onClick={() => setSql(s.sql)}>{s.label}</button>)}</div>
@@ -595,10 +697,13 @@ function SqlTab({ refv }: { refv: LakeRef }) {
           <div className="row between"><span className="xs faint">DuckDB 只读查询：表名 lake；禁止写操作与读取本机文件。⌘/Ctrl + Enter 执行</span><Button variant="primary" loading={loading} onClick={run}><Terminal size={13} />执行</Button></div>
         </div></div>
         {error ? <Callout tone="bad">{error}</Callout> : null}
-        {res ? <div className="card"><div className="card-header"><h3>结果</h3><span className="xs faint">{res.rowCount} 行{res.truncated ? '（已截断）' : ''} · {res.elapsedMs} ms</span></div><ResultTable columns={res.columns} rows={res.rows} /></div> : null}
+        {res ? <div className="card"><div className="card-header"><h3>结果</h3><span className="xs faint">{res.rowCount} 行{res.truncated ? '（已截断）' : ''} · {res.elapsedMs} ms</span></div><SqlResultView columns={res.columns} rows={res.rows} /></div> : null}
       </div>
-      <div className="card" style={{ alignSelf: 'flex-start' }}><div className="card-header"><h3>lake 的列</h3></div>
-        <div className="card-body col gap-4">{schema.map((c) => <div key={c.name} className="row between xs"><span className="mono">{c.name}</span><span className="faint">{c.type}</span></div>)}</div></div>
+      <div className="card" style={{ alignSelf: 'flex-start' }}><div className="card-header"><h3><BookOpen size={15} />湖目录</h3><span className="xs faint">分析智能体写 SQL 前先查这里</span></div>
+        <div className="card-body col gap-8">
+          <input value={intent} onChange={(e) => setIntent(e.target.value)} placeholder="按意图找列 / 口径，例如：延迟、拒答、策略" />
+          <CatalogPanel catalog={catalog} onPick={setSql} onChanged={() => lakeApi.catalog(intent, refv).then(setCatalog).catch(() => undefined)} />
+        </div></div>
     </div>
   );
 }
@@ -622,25 +727,29 @@ function AgentTab({ refv }: { refv: LakeRef }) {
           <Button variant="primary" loading={loading} onClick={() => run()}><Bot size={13} />分析</Button>
         </div>
         <div className="row gap-6 wrap">{AGENT_SAMPLES.map((s) => <button key={s} className="badge" style={{ cursor: 'pointer' }} onClick={() => run(s)}>{s}</button>)}</div>
-        <div className="xs faint">智能体会规划工具调用（概况 / 检索质量 / 知识缺口 / 主题 / SQL / 语义检索），执行后写结论；每次分析和它的工具调用也会写回 Agent 湖，可检索、可回放。</div>
+        <div className="xs faint">智能体先在湖目录里找相关的列 / meta 键 / 指标口径 / 示例 SQL，按决策罗盘规划工具调用（目录 / 概况 / 检索质量 / 缺口 / 复测 / 路由 / 主题 / SQL / 检索），执行后看结果反思、不够再查，最后写结论。每次分析和工具调用也写回湖里，成为下次的示例。</div>
       </div></div>
       {loading ? <Spinner label="规划 → 调用工具 → 汇总结论" /> : null}
       {error ? <Callout tone="bad">{error}</Callout> : null}
       {res ? (
         <div className="grid" style={{ gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: 16 }}>
-          <div className="card"><div className="card-header"><h3><Sparkles size={15} />结论</h3><span className="xs faint">规划：{res.planner === 'llm' ? '模型' : '规则'} · 汇总：{res.summarizer === 'llm' ? '模型' : '模板'} · {Math.round(res.elapsedMs)} ms</span></div>
-            <div className="card-body"><Markdown text={res.answer} /></div></div>
+          <div className="col gap-16">
+            <div className="card"><div className="card-header"><h3><Sparkles size={15} />结论</h3><span className="xs faint">规划：{res.planner === 'llm' ? '模型' : '规则'} · 汇总：{res.summarizer === 'llm' ? '模型' : '模板'}{res.rounds && res.rounds > 1 ? ` · ${res.rounds} 轮` : ''} · {Math.round(res.elapsedMs)} ms</span></div>
+              <div className="card-body"><Markdown text={res.answer} /></div></div>
+            {res.catalog ? <div className="card"><div className="card-header"><h3><BookOpen size={15} />规划时参考的目录</h3><span className="xs faint">按问题挑出的列 / meta 键 / 口径 / 示例</span></div>
+              <div className="card-body"><CatalogPanel catalog={res.catalog} compact /></div></div> : null}
+          </div>
           <div className="card"><div className="card-header"><h3>工具调用（{res.steps.length}）</h3></div>
             {res.steps.map((s, i) => (
               <div key={i} style={{ borderBottom: '1px solid var(--border)' }}>
                 <button className="list-item" style={{ width: '100%', textAlign: 'left' }} onClick={() => setOpen(open === i ? null : i)}>
-                  <Badge tone={s.error ? 'bad' : 'info'} mono>{i + 1}. {s.tool}</Badge><span className="small ellipsis flex-1">{s.why}</span><span className="xs faint">{s.ms} ms</span>
+                  <Badge tone={s.error ? 'bad' : s.empty ? 'warn' : 'info'} mono>{i + 1}. {s.tool}</Badge><span className="small ellipsis flex-1">{s.why}</span><span className="xs faint">{s.empty ? '结果为空 · ' : typeof s.rows === 'number' ? `${s.rows} 行 · ` : ''}{s.ms} ms</span>
                 </button>
                 {open === i ? (
                   <div className="card-body col gap-8">
                     <pre className="xs mono pre" style={{ margin: 0 }}>{JSON.stringify(s.args, null, 2)}</pre>
                     {s.error ? <Callout tone="bad">{s.error}</Callout> : s.tool === 'sql' && s.result && typeof s.result === 'object' && 'columns' in (s.result as object)
-                      ? <ResultTable columns={(s.result as SqlResult).columns} rows={(s.result as SqlResult).rows} />
+                      ? <SqlResultView columns={(s.result as SqlResult).columns} rows={(s.result as SqlResult).rows} />
                       : <pre className="xs mono pre" style={{ margin: 0, maxHeight: 300, overflow: 'auto' }}>{JSON.stringify(s.result, null, 2)}</pre>}
                   </div>
                 ) : null}
