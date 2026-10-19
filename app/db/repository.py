@@ -8,7 +8,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from .models import AppSetting, ChatMessage, ChatSession, Document, EvalReportRow, KnowledgeBase, ModelConfig
+from .models import AppSetting, ChatMessage, ChatSession, Document, EvalReportRow, FeishuDoc, KnowledgeBase, ModelConfig
 
 
 class Repository:
@@ -64,6 +64,37 @@ class Repository:
 
     def delete_document(self, doc: Document) -> None:
         self.db.delete(doc)
+        self.db.commit()
+
+    # --- 飞书文档关联 ---------------------------------------------------------------
+    def list_feishu_docs(self, kb_id: str | None = None) -> list[FeishuDoc]:
+        q = self.db.query(FeishuDoc)
+        if kb_id:
+            q = q.filter(FeishuDoc.kb_id == kb_id)
+        return q.order_by(FeishuDoc.created_at.desc()).all()
+
+    def get_feishu_doc(self, link_id: str) -> FeishuDoc | None:
+        return self.db.get(FeishuDoc, link_id)
+
+    def find_feishu_doc(self, kb_id: str, document_id: str) -> FeishuDoc | None:
+        return self.db.query(FeishuDoc).filter(FeishuDoc.kb_id == kb_id, FeishuDoc.document_id == document_id).first()
+
+    def feishu_docs_by_document(self, document_id: str) -> list[FeishuDoc]:
+        return self.db.query(FeishuDoc).filter(FeishuDoc.document_id == document_id).all()
+
+    def save_feishu_doc(self, link: FeishuDoc | None, **fields: Any) -> FeishuDoc:
+        if link is None:
+            link = FeishuDoc(**fields)
+            self.db.add(link)
+        else:
+            for k, v in fields.items():
+                setattr(link, k, v)
+        self.db.commit()
+        self.db.refresh(link)
+        return link
+
+    def delete_feishu_doc(self, link: FeishuDoc) -> None:
+        self.db.delete(link)
         self.db.commit()
 
     # --- 模型配置 -------------------------------------------------------------------

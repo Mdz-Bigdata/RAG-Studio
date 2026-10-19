@@ -17,6 +17,7 @@ data/indexes/
 data/uploads/
 data/mineru_out/
 data/popo/
+data/feishu_media/
 data/*.db
 *.log
 

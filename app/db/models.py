@@ -1,4 +1,4 @@
-"""SQLite 元数据模型：知识库 / 文档 / 模型配置 / 会话 / 设置 / 评测报告。切片与向量在 prism.Index（每库一目录）。"""
+"""SQLite 元数据模型：知识库 / 文档 / 飞书文档关联 / 模型配置 / 会话 / 设置 / 评测报告。切片与向量在 prism.Index（每库一目录）。"""
 
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ class KnowledgeBase(Base):
 
     documents = relationship("Document", back_populates="knowledge_base", cascade="all, delete-orphan")
     sessions = relationship("ChatSession", back_populates="knowledge_base", cascade="all, delete-orphan")
+    feishu_docs = relationship("FeishuDoc", back_populates="knowledge_base", cascade="all, delete-orphan")
 
 
 class Document(Base):
@@ -60,6 +61,27 @@ class Document(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     knowledge_base = relationship("KnowledgeBase", back_populates="documents")
+
+
+class FeishuDoc(Base):
+    """飞书文档 ⇄ 知识库文档的关联：同步时按 revision_id 判断飞书上有没有改过，改过才重新入库。"""
+
+    __tablename__ = "feishu_docs"
+
+    id = Column(String(36), primary_key=True, default=_uuid)
+    kb_id = Column(String(36), ForeignKey("knowledge_bases.id"), nullable=False, index=True)
+    document_id = Column(String(64), nullable=False, index=True)    # 飞书 docx 的 document_id（知识库节点已解析成实际文档）
+    title = Column(String(255), nullable=True)
+    url = Column(String(500), nullable=True)
+    revision_id = Column(Integer, nullable=True)                     # 上次同步时的飞书版本号
+    local_doc_id = Column(String(36), nullable=True, index=True)     # 入库后的 documents.id
+    status = Column(String(20), default="PENDING")                   # PENDING / SYNCED / FAILED
+    error_message = Column(String(1000), nullable=True)
+    synced_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    knowledge_base = relationship("KnowledgeBase", back_populates="feishu_docs")
 
 
 class ModelConfig(Base):

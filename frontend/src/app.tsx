@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { BarChart3, Waves, Boxes, Brain, Compass, ChevronDown, ChevronLeft, ChevronRight, Cpu, Database, FlaskConical, HeartPulse, Images, LayoutDashboard, MessageSquare, Moon, ScanSearch, Settings2, Sun, Target, Users, X } from 'lucide-react';
+import { BarChart3, Waves, Boxes, Brain, Compass, ChevronDown, ChevronLeft, ChevronRight, Cpu, Database, FileText, FlaskConical, HeartPulse, Images, LayoutDashboard, MessageSquare, Moon, ScanSearch, Settings2, Sun, Target, Users, X } from 'lucide-react';
 import { IdentitySelect } from './components/identity-select';
 import { AppProvider, useApp } from './store/app-store';
 import { DashboardPage } from './pages/dashboard';
@@ -13,18 +13,20 @@ import { EvalPage } from './pages/eval';
 import { ModelsPage } from './pages/models';
 import { SettingsPage } from './pages/settings';
 import { LakePage } from './pages/lake';
+import { FeishuPage } from './pages/feishu';
 import { LanceDBPage } from './pages/lancedb';
 import { MemoryPage } from './pages/memory';
 import { AgentsPage } from './pages/agents';
 import { RecommendPage } from './pages/recommend';
 import { applyTheme, currentTheme, type Theme } from './lib/theme';
 
-export type PageKey = 'dashboard' | 'kb' | 'coverage' | 'corpus' | 'playground' | 'multimodal' | 'chat' | 'eval' | 'lake' | 'lancedb' | 'memory' | 'agents' | 'recommend' | 'models' | 'settings';
+export type PageKey = 'dashboard' | 'kb' | 'feishu' | 'coverage' | 'corpus' | 'playground' | 'multimodal' | 'chat' | 'eval' | 'lake' | 'lancedb' | 'memory' | 'agents' | 'recommend' | 'models' | 'settings';
 
 // 工作流按实际调优顺序排列：先把语料与切片做对，再调检索，最后用评测确认。
 const PAGES: { key: PageKey; label: string; title: string; subtitle: string; icon: React.ReactNode; section?: string }[] = [
   { key: 'dashboard', label: '总览', title: '系统总览', subtitle: '运行状态、六项核心检索能力与当前生效的管线配置', icon: <LayoutDashboard size={16} className="nav-icon" /> },
   { key: 'kb', label: '知识库', title: '知识库与文档', subtitle: 'MinerU / Markdown 解析 → 清洗 → 语义感知切片 → Parent-Child → 向量 + BM25 索引', icon: <Database size={16} className="nav-icon" />, section: '工作流' },
+  { key: 'feishu', label: '飞书文档', title: '飞书文档', subtitle: '飞书文档同步进知识库（按版本增量）、远程增删改查，文档智能体用自然语言查询 / 分析 / 修改飞书文档', icon: <FileText size={16} className="nav-icon" /> },
   { key: 'coverage', label: '语料覆盖', title: '语料准备：意图 × 知识覆盖', subtitle: '把用户会问的问题与现有语料对齐：哪些知识还没准备好，哪些材料与目标无关', icon: <Target size={16} className="nav-icon" /> },
   { key: 'corpus', label: '语料治理', title: '语料优化与增强', subtitle: '质量体检与剔除 → 覆盖缺口 FAQ 增强 → 别名 / 关键词扩展 → 自动元数据', icon: <HeartPulse size={16} className="nav-icon" /> },
   { key: 'playground', label: '检索实验室', title: '检索实验室', subtitle: '查询层 → 多路召回 → RRF 融合 → 精排 → Small-to-Big，每一层可见、可按请求覆盖参数', icon: <FlaskConical size={16} className="nav-icon" /> },
@@ -169,6 +171,7 @@ function Shell() {
         <div className={`content ${fullHeight ? 'no-scroll' : ''}`} key={page}>
           {page === 'dashboard' && <DashboardPage go={go} />}
           {page === 'kb' && <KnowledgeBasesPage />}
+          {page === 'feishu' && <FeishuPage />}
           {page === 'coverage' && <CoveragePage go={go} />}
           {page === 'corpus' && <CorpusPage go={go} />}
           {page === 'playground' && <PlaygroundPage />}

@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .api import agents_router, chat_router, corpus_router, documents_router, eval_router, kb_router, lake_router, lance_router, memory_router, models_router, multimodal_router, recommend_router, retrieval_router, settings_router, system_router
+from .api import agents_router, chat_router, corpus_router, documents_router, eval_router, feishu_router, kb_router, lake_router, lance_router, memory_router, models_router, multimodal_router, recommend_router, retrieval_router, settings_router, system_router
 from .config import app_config
 from .db import init_db
 
@@ -37,7 +37,12 @@ async def lifespan(_: FastAPI):
     from .services import model_service
 
     threading.Thread(target=model_service.warmup, name="model-warmup", daemon=True).start()
+    # 飞书文档定时同步（间隔在「飞书文档」页配置，0 = 关闭）
+    from .services.feishu_service import feishu_service
+
+    feishu_service.start_auto_sync()
     yield
+    feishu_service.stop_auto_sync()
 
 
 app = FastAPI(
@@ -64,6 +69,7 @@ app.include_router(memory_router, prefix=f"{p}/memory", tags=["Memory"])
 app.include_router(recommend_router, prefix=f"{p}/recommend", tags=["Recommend"])
 app.include_router(agents_router, prefix=f"{p}/agents", tags=["Agents"])
 app.include_router(lake_router, prefix=f"{p}/lake", tags=["AgentLake"])
+app.include_router(feishu_router, prefix=f"{p}/feishu", tags=["Feishu"])
 
 
 @app.get(f"{p}/health")

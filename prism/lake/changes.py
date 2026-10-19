@@ -19,6 +19,7 @@ REASONS = {
     "markdown": "按 Markdown 重建",
     "rebuild": "整库重建",
     "delete": "删除",
+    "feishu_sync": "飞书同步",
 }
 # 只在内容真的变了时才记录的系统动作（整库重建 / 换模型重建会对每份文档各来一次，不变就不刷屏）
 QUIET_WHEN_UNCHANGED = {"parse", "markdown", "rebuild"}

@@ -40,6 +40,7 @@ pytest                                       # 39 个测试，无需模型与网
 | --- | --- | --- |
 | — | 总览 | 六项核心检索能力的开关与当前值、离线建库 / 在线检索管线、运行时模型、漏斗 |
 | 01 | 知识库 | 上传 → 解析 → 清洗 → 切片 → 索引；切片预览（Parent-Child）、Markdown 校对回灌、元数据（版本 / 生效区间 / 标签）、实体织网、解析能力矩阵、MinerU-Popo 流程、重新解析 |
+| — | 飞书文档 | 飞书 / Lark 文档（docx、知识库 wiki 链接）同步进知识库（按版本号增量）；在页面上查看、新建、追加、整篇替换、查找替换、删除飞书文档；文档智能体用自然语言查询 / 分析 / 修改飞书文档（写操作默认需确认） |
 | 02 | 语料覆盖 | 意图空间 × 知识空间：每条意图分到 高匹配 / 部分匹配 / 无匹配，给出缺失关键词；找出未被任何意图命中 / 已过期的文档 |
 | 03 | 语料治理 | 质量体检（乱码 / 目录页 / 重复 / 近似重复 / 多版本同时生效…）与按内容指纹剔除；为覆盖缺口生成 FAQ 草稿、人工审核后发布；别名词典与从语料发现；自动元数据复核 |
 | 04 | 检索实验室 | 查询层 → 各路召回 → 融合 → 精排 → MMR → 最终上下文 → 织网 / 多跳，逐层可见；右侧按请求覆盖任意参数做 A/B |
@@ -252,6 +253,22 @@ API：`/api/v1/lancedb/*`、`/api/v1/memory/*`、`/api/v1/recommend/*`、`/api/v
 分析智能体（deepseek-flash 规划 + 汇总）一次 3 个工具调用约 4 秒。社区版 LanceDB 没有分支 diff / cherry-pick，这里按 id 自己比较与合并。
 API 在 `/api/v1/lake/*`，参数在 `config.yaml` 的 `lake` 段；依赖 `uv pip install -e ".[lake]"`（lancedb + duckdb + pandas）。
 
+## 飞书文档：同步 · 增删改查 · 文档智能体
+
+飞书企业自建应用（tenant_access_token）读写新版文档（docx）、云空间文件夹和知识库（wiki）节点；凭据在「飞书文档 → 应用配置」里填，
+或用环境变量 `FEISHU_APP_ID` / `FEISHU_APP_SECRET` / `FEISHU_DOMAIN`（`feishu` / `lark`）。应用需开通 `docx:document`、`drive:drive`、
+`wiki:wiki:readonly` 并发布版本；文档要在「…→ 添加文档应用」里加上这个应用（或放进应用有权限的文件夹）。
+
+| 能力 | 做什么 | 代码 |
+| --- | --- | --- |
+| 同步进知识库 | 链接 / document_id / 文件夹里勾选 → 块转 Markdown（标题层级、嵌套列表、待办、代码、引用 / 高亮块、表格；图片 / 画板留占位）→ 带 front matter（标题、标签「飞书」、来源链接）存成 .md → 普通的解析 / 切片 / 索引。按 `revision_id` 判断飞书上改没改，没改跳过；之后检索、问答、评测、Agent 湖（`doc_event`「飞书同步」）都把它当普通文档 | `prism/feishu/convert.py`、`app/services/feishu_service.py` |
+| 自动同步 | 定时：「应用配置 → 自动同步」选间隔（`auto_sync_minutes`，0 = 关闭），后台线程按间隔对所有接入了飞书文档的知识库增量同步，同一时间只跑一轮。事件（可选，更及时）：飞书开发者后台「事件与回调」请求地址填 `https://<域名>/api/v1/feishu/events`、订阅「文档编辑」`drive.file.edit_v1`，在页面填 Verification Token（设了 Encrypt Key 也一并填）；收到事件只同步那一篇。飞书只推送订阅过的文档：配好 Token 后新接入的会自动订阅，之前接入的在页面上一键补订阅。`deploy/nginx-rag-studio.conf` 已让这个地址免登录（它自己校验 Token） | `app/services/feishu_service.py` |
+| 增删改查 | 读最新全文；新建（可直接入库）；追加；整篇替换（先删正文再写）；查找替换（只改命中的文字段，保留加粗 / 链接等样式）；删除（进飞书回收站并移出知识库）。改过的文档如果已入库，写完自动重新同步。带表格的 Markdown 优先用官方转换接口写入，不可用时按行写成文本 | `prism/feishu/client.py` |
+| 文档智能体 | 规划 → 调工具（列出 / RAG 检索 / 读取 / 新建 / 追加 / 整篇替换 / 查找替换 / 删除 / 同步）→ 看结果反思追加 → 汇总；总结、对比、找矛盾等分析由模型基于读到的原文完成。写操作默认只列出「待确认」，页面上确认后才执行（`agent_allow_write` 或页面开关可改为直接写）；没有文本模型时按规则只做查询 | `prism/feishu/agent.py` |
+
+API 在 `/api/v1/feishu/*`（`config` / `docs` / `import` / `sync` / `sync/auto` / `events` / `events/subscribe` / `remote` / `folder` / `agent/run`（SSE）/ `agent/execute`）；
+经代理或私有化部署访问开放平台时用 `FEISHU_API_BASE` 覆盖接口地址。测试用内存里的假开放平台（`tests/test_feishu.py`），不碰网络。
+
 ## 语料治理
 
 在调检索参数之前先把语料做干净、做完整（`prism/corpus/`，页面「语料治理」）：
@@ -373,6 +390,7 @@ prism/                    核心库（不依赖 Web）
   generation/             Anthropic SDK / OpenAI 兼容 / 回答协议
   eval/                   黄金集 / 指标 / 消融 / 错误归因 / 意图覆盖分析
   corpus/                 语料治理：质量体检 / 别名词典 / 关键词扩展 / 自动元数据 / 覆盖缺口 FAQ
+  feishu/                 飞书开放平台客户端 / 文档块 ⇄ Markdown / 文档智能体（增删改查与分析）
   cli.py                  rag ingest | query | ask | coverage | eval | popo-export | serve | stats
 app/                      FastAPI 后端：api/ 路由、services/ 业务、db/ SQLite 元数据
 frontend/                 React 19 + Vite + TypeScript

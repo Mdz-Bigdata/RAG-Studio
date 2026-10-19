@@ -638,3 +638,42 @@ textarea.mono { font-family: var(--font-mono); font-size: 12.5px; }
 .bulk-bar.active { background: color-mix(in srgb, var(--accent) 7%, var(--bg-2)); }
 .bulk-bar input[type='checkbox'], .record-row .row-check { width: 15px; height: 15px; margin: 0; flex-shrink: 0; cursor: pointer; accent-color: var(--accent); }
 .record-row.is-selected { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+
+/* ---------------------------------------------------------------- 飞书文档原样展示（prism/feishu/render.py 生成的 HTML）
+   和飞书网页版一样是白底文档纸面，不随深色主题变：标题字号、列表符号 / 编号、颜色、表格、代码块都按飞书的取值 */
+.fs-paper { background: #fff; color: #1f2329; border-radius: 8px; padding: 28px 36px 36px; margin: -4px -2px; }
+.fs-doc { font-size: 16px; line-height: 1.74; word-break: break-word; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif; }
+.fs-doc .fs-title { font-size: 34px; line-height: 1.4; font-weight: 700; margin: 0 0 20px; color: #1f2329; }
+.fs-doc .fs-p { margin: 0; padding: 4px 0; min-height: 1.74em; }
+.fs-doc .fs-h { font-weight: 600; color: #1f2329; line-height: 1.5; }
+.fs-doc .fs-h1 { font-size: 26px; margin: 26px 0 10px; } .fs-doc .fs-h2 { font-size: 22px; margin: 22px 0 8px; } .fs-doc .fs-h3 { font-size: 20px; margin: 20px 0 8px; }
+.fs-doc .fs-h4 { font-size: 18px; margin: 18px 0 6px; } .fs-doc .fs-h5 { font-size: 17px; margin: 16px 0 6px; }
+.fs-doc .fs-h6, .fs-doc .fs-h7, .fs-doc .fs-h8, .fs-doc .fs-h9 { font-size: 16px; margin: 14px 0 4px; }
+.fs-doc .fs-li { display: flex; align-items: flex-start; padding: 2px 0; }
+.fs-doc .fs-marker { flex: none; min-width: 22px; padding-right: 6px; color: #3370ff; text-align: right; font-variant-numeric: tabular-nums; }
+.fs-doc .fs-marker.fs-check { color: #8f959e; text-align: left; }
+.fs-doc .fs-li-body { flex: 1; min-width: 0; }
+.fs-doc .fs-todo-done .fs-li-body { color: #8f959e; text-decoration: line-through; }
+.fs-doc .fs-nested { padding-left: 28px; }
+.fs-doc strong { font-weight: 600; }
+.fs-doc a { color: #245bdb; text-decoration: none; } .fs-doc a:hover { text-decoration: underline; }
+.fs-doc code { background: #f2f3f5; border: 1px solid #dee0e3; border-radius: 4px; padding: 0 4px; font-size: 0.9em; font-family: Menlo, Consolas, monospace; }
+.fs-doc .fs-code { background: #f5f6f7; border-radius: 6px; margin: 8px 0; padding: 10px 14px; }
+.fs-doc .fs-code-lang { font-size: 12px; color: #8f959e; margin-bottom: 4px; }
+.fs-doc .fs-code pre { margin: 0; overflow-x: auto; font-size: 14px; line-height: 1.6; font-family: Menlo, Consolas, monospace; }
+.fs-doc .fs-code-wrap pre { white-space: pre-wrap; }
+.fs-doc .fs-code code { background: none; border: 0; padding: 0; font-size: inherit; }
+.fs-doc .fs-quote { margin: 6px 0; padding: 0 0 0 14px; border-left: 2px solid #bbbfc4; color: #646a73; }
+.fs-doc .fs-callout { display: flex; gap: 10px; margin: 8px 0; padding: 12px 16px; border: 1px solid #dee0e3; border-radius: 8px; background: #f5f6f7; }
+.fs-doc .fs-callout-emoji { flex: none; font-size: 18px; line-height: 1.6; } .fs-doc .fs-callout-body { flex: 1; min-width: 0; }
+.fs-doc .fs-hr { border: 0; border-top: 1px solid #dee0e3; margin: 12px 0; }
+.fs-doc .fs-img { margin: 8px 0; } .fs-doc .fs-img img { max-width: 100%; height: auto; border-radius: 4px; vertical-align: top; }
+.fs-doc .fs-img-caption { font-size: 14px; color: #8f959e; text-align: center; margin-top: 4px; }
+.fs-doc .fs-table-wrap { overflow-x: auto; margin: 8px 0; }
+.fs-doc .fs-table { border-collapse: collapse; table-layout: fixed; }
+.fs-doc .fs-table td, .fs-doc .fs-table th { border: 1px solid #dee0e3; padding: 6px 10px; vertical-align: top; text-align: left; font-weight: normal; }
+.fs-doc .fs-table th { background: #f5f6f7; }
+.fs-doc .fs-table .fs-p { padding: 2px 0; min-height: 0; }
+.fs-doc .fs-grid { display: flex; gap: 16px; } .fs-doc .fs-grid-col { min-width: 0; }
+.fs-doc .fs-placeholder { color: #8f959e; background: #f5f6f7; border-radius: 6px; padding: 8px 12px; margin: 6px 0; font-size: 14px; }
+.fs-doc .fs-mention { color: #245bdb; } .fs-doc .fs-eq { font-family: "Times New Roman", serif; font-style: italic; }
