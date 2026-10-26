@@ -41,6 +41,7 @@ class FakeFeishu:
         self.media: dict[str, bytes] = {}
         self.missing_scopes: set[str] = set()   # 路径前缀：模拟应用没开通对应权限
         self.shared: dict[str, str] = {}         # document_id → 链接分享范围
+        self.uploads: list[tuple[str, str]] = []  # (parent_node, file_name)
 
     # ---- 造数据
     def add_doc(self, title: str, children: list[dict[str, Any]], document_id: str | None = None) -> str:
@@ -78,7 +79,7 @@ class FakeFeishu:
         path = request.url.path.removeprefix("/open-apis")
         method = request.method
         self.calls.append((method, path))
-        body = json.loads(request.content or b"{}") if request.content else {}
+        body = json.loads(request.content) if request.content and "json" in request.headers.get("content-type", "") else {}
         ok = lambda data=None: httpx.Response(200, json={"code": 0, "msg": "success", "data": data or {}})   # noqa: E731
         if path == "/auth/v3/tenant_access_token/internal":
             if body.get("app_secret") != "secret":
@@ -101,6 +102,16 @@ class FakeFeishu:
             return ok({"node": {"obj_token": obj[0], "obj_type": obj[1], "title": "wiki"}}) if obj else httpx.Response(400, json={"code": 131005, "msg": "not found"})
         if path == "/drive/v1/files" and method == "GET":
             return ok({"files": [{"token": d, "name": v["title"], "type": "docx", "url": f"https://x.feishu.cn/docx/{d}"} for d, v in self.docs.items()], "has_more": False})
+        if path == "/drive/v1/medias/upload_all" and method == "POST":
+            raw = request.content
+            parent = re.search(rb'name="parent_node"\r\n\r\n([^\r]+)', raw)
+            part = re.search(rb'name="file"; filename="([^"]+)"\r\n(?:[^\r]+\r\n)*\r\n(.*?)\r\n--', raw, re.S)
+            if not (parent and part):
+                return httpx.Response(400, json={"code": 1061002, "msg": "bad multipart"})
+            token = "img" + uuid.uuid4().hex[:12]
+            self.media[token] = part.group(2)
+            self.uploads.append((parent.group(1).decode(), part.group(1).decode()))
+            return ok({"file_token": token})
         m = re.fullmatch(r"/drive/v1/permissions/(\w+)/public", path)
         if m and method == "PATCH":
             self.shared[m.group(1)] = body["link_share_entity"]
@@ -164,6 +175,12 @@ class FakeFeishu:
             doc["revision"] += 1
             return ok({})
         m2 = re.fullmatch(r"/blocks/(\w+)", rest)
+        if m2 and method == "PATCH" and "replace_image" in body:
+            b = doc["blocks"][m2.group(1)]
+            assert b["block_type"] == 27 and body["replace_image"]["token"] in self.media
+            b["image"]["token"] = body["replace_image"]["token"]
+            doc["revision"] += 1
+            return ok({"block": b})
         if m2 and method == "PATCH":
             b = doc["blocks"][m2.group(1)]
             field = next(k for k in b if isinstance(b[k], dict) and "elements" in b[k])
@@ -928,6 +945,42 @@ def test_write_kb_article_into_feishu_verbatim(env, article_kb):
     # 写操作待确认时，确认接口照样能执行带 source_doc_id 的调用
     r = c.post("/api/v1/feishu/agent/execute", json={"kbId": kb, "tool": "create_doc", "args": {"source_doc_id": doc_id, "title": "铁律副本"}})
     assert r.status_code == 200 and "铁律一" in fake.markdown(r.json()["result"]["documentId"])
+
+
+def test_markdown_local_images_uploaded(env, tmp_path):
+    """Markdown 里的本地图片写进飞书：占位 → 空图片块 → 上传素材 → 填图 → 删占位；http 图片和找不到的文件原样留文字。"""
+    c, fake, kb_id = env
+    from pathlib import Path
+
+    from app.services.feishu_service import feishu_service
+
+    (tmp_path / "images").mkdir()
+    (tmp_path / "images" / "arch.png").write_bytes(_png("blue"))
+    md = "## 架构\n\n![整体架构](images/arch.png)\n\n说明文字\n\n![远程](https://x.com/a.png)\n\n![没有的](images/none.png)\n\n| a | b |\n|---|---|\n| 1 | 2 |\n"
+    r = feishu_service.create("带图文档", md, image_base=tmp_path)
+    did = r["documentId"]
+    doc = fake.docs[did]
+    kids = [doc["blocks"][i] for i in doc["blocks"][did]["children"]]
+    types = [b["block_type"] for b in kids]
+    assert types[:3] == [4, 27, 2], types                                   # 标题、图片、说明文字；占位段落已删掉
+    assert fake.media[kids[1]["image"]["token"]] == _png("blue")
+    assert fake.uploads == [(kids[1]["block_id"], "arch.png")]            # 素材挂在图片块上
+    text = fake.markdown(did)
+    assert "feishu-image" not in text and "https://x.com/a.png" in text and "images/none.png" in text
+    assert "1 ｜ 2" in text or "| 1 | 2 |" in text                           # 表格照常
+    # 页面展示时图片走代理地址
+    html = feishu_service.read(did, view=True)["html"]
+    assert f'/api/v1/feishu/media/{kids[1]["image"]["token"]}' in html
+    # 追加也支持；上传权限缺失时占位改成说明，不中断写入
+    fake.missing_scopes = {"/drive/v1/medias/upload_all"}
+    try:
+        feishu_service.write(did, "![再来一张](images/arch.png)", mode="append", image_base=tmp_path)
+    finally:
+        fake.missing_scopes = set()
+    assert "没能上传" in fake.markdown(did) and "docs:document.media:upload" in fake.markdown(did)
+    # 不给 image_base：图片语法原样写成文字（接口调用的默认行为）
+    r2 = feishu_service.write(did, "![x](images/arch.png)", mode="append")
+    assert r2["blocks"] == 1 and "![x](images/arch.png)" in fake.markdown(did)
 
 
 def test_new_doc_share_scope_missing_is_reported(env):

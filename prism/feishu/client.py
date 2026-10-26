@@ -14,6 +14,7 @@
     GET    /drive/v1/files                                             列文件夹
     GET    /wiki/v2/spaces/get_node                                    知识库节点 → 实际文档 token
     POST   /drive/v1/files/{token}/subscribe?file_type=docx            订阅文档变更（之后才会推送 drive.file.edit_v1 事件）
+    POST   /drive/v1/medias/upload_all                                 上传图片素材（parent_type=docx_image，挂到一个空图片块上）
     GET    /drive/v1/medias/{token}/download                           下载文档里的图片 / 附件（二进制）
     PATCH  /drive/v1/permissions/{token}/public?type=docx              文档的链接分享权限（应用新建的文档默认只有应用自己能看）
 
@@ -110,13 +111,14 @@ class FeishuClient:
             self._token = (body["tenant_access_token"], time.time() + max(60, ttl - 300))
             return self._token[0]
 
-    def request(self, method: str, path: str, *, params: dict[str, Any] | None = None, json: Any = None) -> dict[str, Any]:
-        """返回响应里的 data；code != 0 抛 FeishuError（token 过期自动刷新重试，限流退避重试）。"""
+    def request(self, method: str, path: str, *, params: dict[str, Any] | None = None, json: Any = None,
+                data: dict[str, Any] | None = None, files: dict[str, Any] | None = None) -> dict[str, Any]:
+        """返回响应里的 data；code != 0 抛 FeishuError（token 过期自动刷新重试，限流退避重试）。data / files 走 multipart（上传素材）。"""
         refreshed = False
         for attempt in range(self.max_retries + 1):
             token = self.tenant_token()
             resp = self._http.request(method, path, params={k: v for k, v in (params or {}).items() if v is not None},
-                                      json=json, headers={"Authorization": f"Bearer {token}"})
+                                      json=json, data=data, files=files, headers={"Authorization": f"Bearer {token}"})
             body = _json(resp)
             code = body.get("code")
             if code == 0:
@@ -229,6 +231,30 @@ class FeishuClient:
             return
         self.request("DELETE", f"/docx/v1/documents/{document_id}/blocks/{parent_id or document_id}/children/batch_delete",
                      params={"document_revision_id": -1, "client_token": str(uuid.uuid4())}, json={"start_index": start, "end_index": end})
+
+    def insert_image_block(self, document_id: str, index: int, *, parent_id: str | None = None) -> str:
+        """在 parent 下第 index 个位置插一个空图片块，返回它的 block_id（之后 upload_image + replace_image 填图）。"""
+        data = self.request("POST", f"/docx/v1/documents/{document_id}/blocks/{parent_id or document_id}/children",
+                            params={"document_revision_id": -1, "client_token": str(uuid.uuid4())},
+                            json={"children": [{"block_type": 27, "image": {}}], "index": index})
+        children = data.get("children") or []
+        if not children or not children[0].get("block_id"):
+            raise FeishuError("飞书没有返回新图片块的 block_id")
+        return children[0]["block_id"]
+
+    def upload_image(self, block_id: str, data: bytes, file_name: str = "image.png") -> str:
+        """把图片上传为该图片块的素材，返回 file_token。"""
+        resp = self.request("POST", "/drive/v1/medias/upload_all",
+                            data={"file_name": file_name, "parent_type": "docx_image", "parent_node": block_id, "size": str(len(data))},
+                            files={"file": (file_name, data)})
+        token = resp.get("file_token")
+        if not token:
+            raise FeishuError("飞书没有返回上传素材的 file_token")
+        return token
+
+    def replace_image(self, document_id: str, block_id: str, token: str) -> None:
+        self.request("PATCH", f"/docx/v1/documents/{document_id}/blocks/{block_id}", params={"document_revision_id": -1, "client_token": str(uuid.uuid4())},
+                     json={"replace_image": {"token": token}})
 
     def update_text(self, document_id: str, block_id: str, elements: list[dict[str, Any]]) -> None:
         self.request("PATCH", f"/docx/v1/documents/{document_id}/blocks/{block_id}", params={"document_revision_id": -1, "client_token": str(uuid.uuid4())},

@@ -30,7 +30,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import httpx
 import yaml
@@ -58,6 +58,8 @@ SCOPE_PROBES: tuple[tuple[str, str, Callable[[FeishuClient, Any], Any]], ...] = 
     ("media", "docs:document.media:download", lambda c, s: c.download_media("boxcn" + _PROBE)),
 )
 Schedule = Callable[[list[str]], None]          # 把需要解析入库的本地文档 id 交给调用方安排（接口里用 BackgroundTasks）
+_MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(\s*<?([^)\s>]+)>?(?:\s+[\"'][^\"']*[\"'])?\s*\)")
+_IMAGE_PLACEHOLDER, _IMAGE_PLACEHOLDER_END = "⟦feishu-image:", "⟧"     # 写入时的图片占位，正文写完换成图片块
 
 
 class FeishuSettings(BaseModel):
@@ -263,7 +265,9 @@ class FeishuService:
                                                    "modifiedTime": f.get("modified_time"), "linkedKbs": linked.get(f.get("token") or "", [])} for f in files]}
 
     # ------------------------------------------------------------------ 远程：增 / 改 / 删
-    def create(self, title: str, markdown: str = "", *, folder_token: str | None = None, kb_id: str | None = None, schedule: Schedule | None = None) -> dict[str, Any]:
+    def create(self, title: str, markdown: str = "", *, folder_token: str | None = None, kb_id: str | None = None, schedule: Schedule | None = None,
+               image_base: Path | None = None) -> dict[str, Any]:
+        """image_base：Markdown 里 ![](相对路径) 指向的本地图片目录，给了就把图片上传进文档（见 _insert_markdown）。"""
         title = (title or "").strip() or "未命名文档"
         client = self.client()
         doc = client.create_document(title, folder_token if folder_token is not None else (self.settings().folder_token or None))
@@ -271,7 +275,7 @@ class FeishuService:
         if not document_id:
             raise FeishuError("飞书没有返回新文档的 document_id")
         body = _strip_title(markdown, title)
-        written = self._insert_markdown(client, document_id, body) if body.strip() else 0
+        written = self._insert_markdown(client, document_id, body, image_base=image_base) if body.strip() else 0
         url = client.web_url(document_id, self.settings().web_base or None)
         out: dict[str, Any] = {"documentId": document_id, "title": title, "url": url, "blocks": written}
         share = self.settings().new_doc_share
@@ -287,7 +291,8 @@ class FeishuService:
             out["sync"] = self.sync_document(kb_id, document_id, url=url, force=True, schedule=schedule)
         return out
 
-    def write(self, ref: str, markdown: str, *, mode: Literal["append", "replace"] = "append", kb_id: str | None = None, schedule: Schedule | None = None) -> dict[str, Any]:
+    def write(self, ref: str, markdown: str, *, mode: Literal["append", "replace"] = "append", kb_id: str | None = None, schedule: Schedule | None = None,
+              image_base: Path | None = None) -> dict[str, Any]:
         if not (markdown or "").strip():
             raise ValueError("要写入的内容为空")
         document_id, url = self.resolve(ref, kb_id)
@@ -299,7 +304,7 @@ class FeishuService:
             root = next((b for b in client.list_blocks(document_id) if b.get("block_id") == document_id), None)
             removed = len((root or {}).get("children") or [])
             client.delete_children(document_id, 0, removed)
-        written = self._insert_markdown(client, document_id, markdown)
+        written = self._insert_markdown(client, document_id, markdown, image_base=image_base)
         return {"documentId": document_id, "url": url, "mode": mode, "removedBlocks": removed, "blocks": written, "resynced": self._after_write(document_id, schedule)}
 
     def replace_text(self, ref: str, find: str, replace: str, *, kb_id: str | None = None, schedule: Schedule | None = None) -> dict[str, Any]:
@@ -337,15 +342,54 @@ class FeishuService:
                 removed.append(link_id)
         return {"documentId": document_id, "url": url, "deleted": True, "unlinked": removed}
 
-    def _insert_markdown(self, client: FeishuClient, document_id: str, markdown: str) -> int:
+    def _insert_markdown(self, client: FeishuClient, document_id: str, markdown: str, *, image_base: Path | None = None) -> int:
+        """Markdown 写进文档末尾。image_base 给了时，![](本地相对路径) 先写成占位段落，正文写完再换成真正的图片块（上传素材）；
+        找不到的文件、http 图片原样保留为文字。"""
+        images: list[tuple[str, Path]] = []
+        if image_base is not None:
+            def swap(m: re.Match[str]) -> str:
+                src = unquote(m.group(2).split("#")[0].split("?")[0])
+                path = (image_base / src).resolve()
+                if re.match(r"^[a-z][a-z0-9+.-]*://", src, re.I) or image_base.resolve() not in path.parents or not path.is_file():
+                    return m.group(0)
+                images.append((f"{_IMAGE_PLACEHOLDER}{len(images)}{_IMAGE_PLACEHOLDER_END}", path))
+                return "\n\n" + images[-1][0] + "\n\n"
+            markdown = _MD_IMAGE_RE.sub(swap, markdown)
+        written = 0
         if self.settings().use_convert_api and has_table(markdown):
             try:
                 first, blocks = client.convert_markdown(markdown)
                 if first and blocks:
-                    return client.insert_descendants(document_id, first, blocks)
+                    written = client.insert_descendants(document_id, first, blocks)
             except FeishuError as exc:
                 logger.info("飞书 Markdown 转换接口不可用，改用内置转换（表格按行写成文本）：%s", exc)
-        return client.append_children(document_id, markdown_to_blocks(markdown))
+        if not written:
+            written = client.append_children(document_id, markdown_to_blocks(markdown))
+        if images:
+            written += self._place_images(client, document_id, dict(images))
+        return written
+
+    def _place_images(self, client: FeishuClient, document_id: str, images: dict[str, Path]) -> int:
+        """把占位段落换成图片块：在占位块前插空图片块 → 上传素材挂到它上 → 填图 → 删占位块。上传失败时占位块改成说明文字。"""
+        placed = 0
+        for marker, path in images.items():
+            blocks = client.list_blocks(document_id)
+            by_id = {b["block_id"]: b for b in blocks}
+            root = by_id.get(document_id) or {}
+            index = next((i for i, cid in enumerate(root.get("children") or []) if block_text(by_id.get(cid, {})).strip() == marker), None)
+            if index is None:
+                logger.warning("飞书文档里找不到图片占位 %s", marker)
+                continue
+            try:
+                block_id = client.insert_image_block(document_id, index)
+                client.replace_image(document_id, block_id, client.upload_image(block_id, path.read_bytes(), path.name))
+                client.delete_children(document_id, index + 1, index + 2)
+                placed += 1
+            except FeishuError as exc:
+                logger.warning("上传图片到飞书失败 %s：%s", path.name, exc)
+                note = f"[图片 {path.name} 没能上传：{'应用缺少上传素材的权限（drive:drive 或 docs:document.media:upload）' if exc.code in SCOPE_MISSING else str(exc)[:120]}]"
+                client.update_text(document_id, root["children"][index], [{"text_run": {"content": note}}])
+        return placed
 
     def _after_write(self, document_id: str, schedule: Schedule | None) -> list[str]:
         """飞书上改过的文档，如果已经接入某个知识库，就重新同步（让检索看到最新内容）。返回重新同步的知识库。"""
