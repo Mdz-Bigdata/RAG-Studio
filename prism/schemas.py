@@ -236,6 +236,8 @@ class RetrievalTrace(BaseModel):
     kb_route: list[dict[str, Any]] = Field(default_factory=list) # 查询路由结果
     # 自查询识别出的元数据条件：{"conditions", "source", "applied", "docs_before", "docs_after", "reason"}
     metadata_filter: dict[str, Any] = Field(default_factory=dict)
+    # 判定库中无答案时，精排靠前但没过阈值的相近主题：{"chunk_id", "doc_id", "label", "snippet", "score"}，给回答层反问用
+    near_misses: list[dict[str, Any]] = Field(default_factory=list)
     timings_ms: dict[str, float] = Field(default_factory=dict)
     notes: list[str] = Field(default_factory=list)
 

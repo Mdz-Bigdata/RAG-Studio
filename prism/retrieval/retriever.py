@@ -42,10 +42,14 @@ from .granularity import expand_contexts
 from .hierarchy import LEVEL_LABEL, levels_for
 from .metadata_filter import describe, extract_llm, extract_rule, facets, matches
 from .query_transform import QueryPlan, QueryTransformer
-from .rerank import BaseReranker, build_reranker
+from .rerank import BaseReranker, NoopReranker, build_reranker
 from .temporal import history_intent
 
 logger = logging.getLogger(__name__)
+
+# 判定无答案时，精排分 ≥ min_score × 该比例的候选才算"相近主题"、可以拿来反问。示例库 + bge-reranker-v2-m3、min_score 0.1 实测：
+# 说得笼统的相关问题（"那个钱怎么报"）top-1 约 0.045；库外问题（"公司食堂几点开饭"）≤ 0.002，交给模型判断仍会硬列出"调休""年假"
+NEAR_MISS_RATIO = 0.2
 
 
 class HybridRetriever:
@@ -98,7 +102,13 @@ class HybridRetriever:
 
         # 自查询在后台识别条件，与查询变换并行：两边各调一次模型，耗时不叠加
         resolve_auto = self._start_self_query(query, history, auto_filter, allowed, cfg)
-        plan = transformer.plan(query, history=history) if use_transform else QueryPlan(original=query, queries=[query])
+        qt = cfg.query_transform
+        # 按需 Multi-Query：分数要和阈值比，只有真正的精排分才有意义；没有精排器时"精排分"其实是 RRF 分，退回每次都扩展
+        adaptive_mq = use_transform and self.llm is not None and qt.multi_query > 0 and qt.multi_query_when == "low_confidence"
+        if adaptive_mq and isinstance(self.reranker, NoopReranker):
+            adaptive_mq = False
+            trace.notes.append("按需 Multi-Query 需要开启精排（分数才能和阈值比），本次每次都扩展")
+        plan = transformer.plan(query, history=history, multi_query=not adaptive_mq) if use_transform else QueryPlan(original=query, queries=[query])
         allowed = self._apply_auto_filter(resolve_auto(), allowed, cfg, trace)
         trace.queries = list(plan.queries)
         trace.hyde_document = plan.hyde_document
@@ -131,6 +141,10 @@ class HybridRetriever:
         trace.reranked = [ScoredChunk(chunk_id=cid, score=s, rank=i + 1, route="rerank") for i, (cid, s) in enumerate(reranked)]
         trace.timings_ms["rerank"] = (time.perf_counter() - t3) * 1000
 
+        if adaptive_mq and (not reranked or reranked[0][1] < qt.multi_query_below):
+            rankings, fused, reranked = self._multi_query_retry(query, plan, transformer, allowed, rankings, fused, reranked,
+                                                                 candidates_n, keep_n, trace, cfg)
+
         if cfg.rerank.min_score is not None:
             above = [(cid, s) for cid, s in reranked if s >= cfg.rerank.min_score]
             if not above and reranked and cfg.rerank.min_score_agreement:
@@ -139,6 +153,7 @@ class HybridRetriever:
                     trace.notes.append(f"精排最高分低于阈值 {cfg.rerank.min_score}，但向量与 BM25 两路第一名指向同一段落：交叉验证通过，不判无答案")
             if not above:
                 trace.notes.append(f"精排最高分低于阈值 {cfg.rerank.min_score}，判定为库中无答案")
+                trace.near_misses = self._near_misses(reranked, floor=cfg.rerank.min_score * NEAR_MISS_RATIO)
             reranked = above
 
         if cfg.rerank.min_score_ratio and reranked:
@@ -363,7 +378,10 @@ class HybridRetriever:
         same = [(cid, s) for cid, s in reranked if parent_id(cid) == agreed]
         return same or [(dense[0][0], 0.0)]
 
-    def _recall(self, plan: QueryPlan, allowed: set[str] | None, trace: RetrievalTrace, cfg: RetrievalConfig) -> dict[str, list[tuple[str, float]]]:
+    def _recall(self, plan: QueryPlan, allowed: set[str] | None, trace: RetrievalTrace, cfg: RetrievalConfig, *,
+                offset: int = 0, extras: bool = True) -> dict[str, list[tuple[str, float]]]:
+        """offset：查询编号起点（补跑的查询接在已有查询后面，路名不冲突）；
+        extras=False：只跑每条查询自己的几路，HyDE / SQL 这类整次检索只跑一次的路不再跑。"""
         top_n = cfg.top_n_per_route
         self.index.bm25._ensure_index()   # 并发前先建好，避免多个线程同时触发首次构建
         # 关键词路：默认 bm25s + jieba；向量后端是 LanceDB 时可改用它的原生全文检索（ICU 分词）
@@ -374,28 +392,29 @@ class HybridRetriever:
             self.index.vectors.ensure_fts()
         q_vecs = self.index.embedder.embed_queries(plan.queries)
         jobs: dict[str, Any] = {}
-        for i, (q, vec) in enumerate(zip(plan.queries, q_vecs)):
+        for i, (q, vec) in enumerate(zip(plan.queries, q_vecs), start=offset):
             jobs[f"dense:q{i}"] = lambda vec=vec: self.index.vectors.search(vec, top_n, allowed)
             if fts is not None:
                 jobs[f"sparse:q{i}"] = lambda q=q: fts(self.index.sparse_query(q), top_n, allowed)
             else:
                 jobs[f"sparse:q{i}"] = lambda q=q: self.index.bm25.search(self.index.sparse_query(q), top_n, allowed)
-        if plan.hyde_document:
+        if extras and plan.hyde_document:
             jobs["dense:hyde"] = lambda: self.index.vectors.search(self.index.embedder.embed_documents([plan.hyde_document])[0], top_n, allowed)
         # 摘要索引 / 分层索引：辅助索引内部先做向量 + BM25 小融合，作为一路交给主融合层
         aux_allowed = self._aux_allowed(allowed)
         if cfg.summary.enabled and len(self.index.aux["summary"]):
-            for i, (q, vec) in enumerate(zip(plan.queries, q_vecs)):
+            for i, (q, vec) in enumerate(zip(plan.queries, q_vecs), start=offset):
                 jobs[f"summary:q{i}"] = lambda q=q, vec=vec: self.index.aux["summary"].search(q, vec, top_n, aux_allowed["summary"])
         if cfg.hierarchy.enabled and (len(self.index.aux["section"]) or len(self.index.aux["sentence"])):
             levels, kind = levels_for(plan.original, cfg.hierarchy.routing)
-            trace.notes.append(f"分层路由：{LEVEL_LABEL.get(kind, '章节级 + 句子级全部参与')}")
+            if extras:
+                trace.notes.append(f"分层路由：{LEVEL_LABEL.get(kind, '章节级 + 句子级全部参与')}")
             for level in levels:
                 if len(self.index.aux[level]):
-                    for i, (q, vec) in enumerate(zip(plan.queries, q_vecs)):
+                    for i, (q, vec) in enumerate(zip(plan.queries, q_vecs), start=offset):
                         jobs[f"{level}:q{i}"] = lambda q=q, vec=vec, level=level: self.index.aux[level].search(q, vec, top_n, aux_allowed[level])
         sql_box: dict[str, Any] = {}
-        if cfg.sql.enabled and len(self.index.tables):
+        if extras and cfg.sql.enabled and len(self.index.tables):
             def run_sql() -> list[tuple[str, float]]:
                 res = self.index.tables.search(plan.original, llm=self.llm if cfg.sql.text_to_sql else None, top_n=cfg.sql.top_n, allowed_ids=allowed)
                 sql_box["res"] = res
@@ -410,7 +429,8 @@ class HybridRetriever:
         else:
             rankings = {k: fn() for k, fn in jobs.items()}
 
-        self._sql_aggregate = None
+        if extras:
+            self._sql_aggregate = None
         res = sql_box.get("res")
         if res is not None:
             if res.note:
@@ -423,6 +443,61 @@ class HybridRetriever:
         for route, r in rankings.items():
             trace.routes[route] = [ScoredChunk(chunk_id=cid, score=s, rank=k + 1, route=route) for k, (cid, s) in enumerate(r)]
         return rankings
+
+    def _multi_query_retry(self, query: str, plan: QueryPlan, transformer: QueryTransformer, allowed: set[str] | None,
+                           rankings: dict[str, list[tuple[str, float]]], fused: list[tuple[str, float]], reranked: list[tuple[str, float]],
+                           candidates_n: int, keep_n: int, trace: RetrievalTrace, cfg: RetrievalConfig):
+        """按需 Multi-Query：首轮精排最高分不够时补跑扩展问法——只召回新问法，与首轮各路一起重新融合、精排。
+        精排分都是"原问题 × 段落"的分数，两轮可比：补跑后最高分没有提高就沿用首轮结果。"""
+        t = time.perf_counter()
+        top1 = reranked[0][1] if reranked else None
+        alts = [q for q in transformer.expand(plan.resolved or query) if q and q not in plan.queries]
+        if not alts:
+            trace.notes.append("按需 Multi-Query：首轮把握不大，但模型没有给出新的问法")
+            return rankings, fused, reranked
+        more = self._recall(QueryPlan(original=plan.original, queries=alts), allowed, trace, cfg, offset=len(plan.queries), extras=False)
+        plan.queries.extend(alts)
+        trace.queries = list(plan.queries)
+        all_rankings = {**rankings, **more}
+        fused2 = self._fuse(all_rankings, cfg)[:candidates_n]
+        reranked2 = self._rerank(query, fused2, keep_n)
+        pop_note = getattr(self.reranker, "pop_note", None)
+        note = pop_note() if callable(pop_note) else None
+        if note and note not in trace.notes:
+            trace.notes.append(note)
+        trace.timings_ms["multi_query_retry"] = (time.perf_counter() - t) * 1000
+        top2 = reranked2[0][1] if reranked2 else None
+        head = f"按需 Multi-Query：首轮精排最高分 {_fmt(top1)} < {cfg.query_transform.multi_query_below}，补跑 {len(alts)} 条扩展问法"
+        if top2 is None or (top1 is not None and top2 <= top1):
+            trace.notes.append(f"{head}，最高分没有提高（{_fmt(top2)}），沿用首轮结果")
+            return rankings, fused, reranked
+        trace.notes.append(f"{head}，最高分 {_fmt(top1)} → {_fmt(top2)}")
+        trace.fused = [ScoredChunk(chunk_id=cid, score=s, rank=i + 1, route="fused") for i, (cid, s) in enumerate(fused2)]
+        trace.reranked = [ScoredChunk(chunk_id=cid, score=s, rank=i + 1, route="rerank") for i, (cid, s) in enumerate(reranked2)]
+        return all_rankings, fused2, reranked2
+
+    def _near_misses(self, reranked: list[tuple[str, float]], *, floor: float, limit: int = 5) -> list[dict[str, Any]]:
+        """判定无答案时，精排靠前的相近主题（按所属 parent 去重）：回答层据此反问用户"是不是想问 X"。
+        分数低于 floor 的不算"相近"：库外问题的候选全是凑数的，交给模型判断也会被硬列出来。"""
+        store = self.index.store
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for cid, score in reranked:
+            if score < floor:
+                break
+            c = store.get(cid)
+            if c is None:
+                continue
+            p = store.parent_of(cid)
+            key = p.chunk_id if p is not None else cid
+            label = c.breadcrumb_text or (store.docs[c.doc_id].title if c.doc_id in store.docs else "") or c.doc_id
+            if key in seen or label in {m["label"] for m in out}:
+                continue
+            seen.add(key)
+            out.append({"chunk_id": cid, "doc_id": c.doc_id, "label": label, "snippet": " ".join(c.text.split())[:120], "score": float(score)})
+            if len(out) >= limit:
+                break
+        return out
 
     def _aux_allowed(self, allowed: set[str] | None) -> dict[str, set[str] | None]:
         """主过滤结果是 child id；换算成摘要（parent id）/ 句子 / 章节单元各自可见的 id。"""
@@ -494,6 +569,10 @@ def _take_top(contexts, top_k: int, order: str):
             (head if i % 2 == 0 else tail).append(ctx)
         return head + tail[::-1]
     return best
+
+
+def _fmt(score: float | None) -> str:
+    return "无" if score is None else f"{score:.3f}"
 
 
 def _as_list(v: Any) -> list[Any]:

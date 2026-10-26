@@ -252,6 +252,10 @@ class GranularityConfig(BaseModel):
 class QueryTransformConfig(BaseModel):
     rewrite: bool = True                 # 口语 → 书面检索表达（Query 压缩）
     multi_query: int = 3                 # 0 = 关闭；扩展为 N 个不同角度问法
+    # always：每次都扩展；low_confidence：先只用原问题（+ 改写）检索，精排最高分低于 multi_query_below 时才补跑 Multi-Query。
+    # 好答的问题省掉扩展问法的召回与模型调用；难答的问题多一次串行的模型调用（约 1 秒）和一轮召回 + 精排
+    multi_query_when: Literal["always", "low_confidence"] = "always"
+    multi_query_below: float = 0.3       # 与 rerank.min_score 同一刻度：bge-reranker-v2-m3 能答的问题 top-1 多在 0.79 以上，同义改写 0.1~0.2
     hyde: bool = True
     hyde_max_query_chars: int = 30       # 仅对短 query 启用 HyDE
     decompose: bool = True               # 多跳问题拆分子问题
@@ -440,10 +444,22 @@ class LLMConfig(BaseModel):
     thinking: Literal["auto", "on", "off"] = "auto"
 
 
+class ClarifyConfig(BaseModel):
+    """检索把握不大时反问用户，而不是硬答或只回一句拒答。需要文本模型。"""
+
+    # 判定库中无答案、但检索到了相近主题时：由模型判断用户是不是想问其中某个，是就列出主题反问；都不相关时照常拒答
+    enabled: bool = True
+    # 精排最高分低于它（但没有被判无答案）时，提示模型：资料若不能确定回答用户想问的内容，就反问，不要猜。
+    # 与 retrieval.rerank.min_score 同一刻度、随重排模型而定；None = 关闭
+    below: float | None = None
+    max_options: int = 3                 # 反问时最多列几个相近主题
+
+
 class GenerationConfig(BaseModel):
     llm: LLMConfig = LLMConfig()
     cite_sources: bool = True
     refuse_when_no_context: bool = True
+    clarify: ClarifyConfig = ClarifyConfig()
     language: str = "zh"
 
 

@@ -88,6 +88,8 @@ const GROUPS: { title: string; icon: React.ReactNode; tone: string; note?: strin
     fields: [
       { path: 'retrieval.query_transform.rewrite', label: '查询改写 / 压缩', type: 'bool' },
       { path: 'retrieval.query_transform.multi_query', label: 'Multi-Query 数量', type: 'num', min: 0, max: 8 },
+      { path: 'retrieval.query_transform.multi_query_when', label: 'Multi-Query 时机', type: 'select', options: [['always', '每次都扩展'], ['low_confidence', '首轮把握不大时才扩展']] },
+      { path: 'retrieval.query_transform.multi_query_below', label: '按需扩展阈值', type: 'num', min: 0, max: 1, step: 0.05, hint: '首轮精排最高分低于它才补跑扩展问法；与拒答阈值同一刻度' },
       { path: 'retrieval.query_transform.hyde', label: 'HyDE 假设文档', type: 'bool' },
       { path: 'retrieval.query_transform.hyde_max_query_chars', label: 'HyDE 仅用于短 query（字符数）', type: 'num', min: 5, max: 200 },
       { path: 'retrieval.query_transform.skip_hyde_on_precise_tokens', label: '精确查询跳过 HyDE', type: 'bool', hint: '含编号 / 数字 / 日期时，假设答案里的数字是编的' },
@@ -193,6 +195,9 @@ const GROUPS: { title: string; icon: React.ReactNode; tone: string; note?: strin
     title: '生成', icon: <GitBranch size={14} />, tone: 'ok',
     fields: [
       { path: 'generation.refuse_when_no_context', label: '无资料时拒答', type: 'bool', hint: '敢说"不知道"是 RAG 成熟的标志' },
+      { path: 'generation.clarify.enabled', label: '无答案时反问相近主题', type: 'bool', hint: '检索到相近主题时列出 2~3 个请用户确认，都不相关才拒答' },
+      { path: 'generation.clarify.below', label: '低把握反问阈值', type: 'num', min: 0, max: 1, step: 0.05, nullable: true, hint: '精排最高分低于它时，资料不能确定回答就反问、不要猜' },
+      { path: 'generation.clarify.max_options', label: '反问最多列几个主题', type: 'num', min: 1, max: 5 },
       { path: 'generation.llm.effort', label: '推理强度（Claude）', type: 'select', options: [['low', 'low'], ['medium', 'medium'], ['high', 'high'], ['xhigh', 'xhigh'], ['max', 'max']] },
       { path: 'generation.llm.max_tokens', label: '最大输出 token', type: 'num', min: 256, max: 64000, step: 256 },
       { path: 'generation.llm.thinking', label: '回答前思考（推理模型）', type: 'select', options: [['auto', 'auto · 仅多跳 / Agentic 模式'], ['off', 'off · 从不（最快）'], ['on', 'on · 总是（首字慢 3~5 秒）']] },

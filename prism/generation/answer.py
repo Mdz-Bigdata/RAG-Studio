@@ -10,7 +10,7 @@ from ..config import GenerationConfig
 from ..schemas import Answer, Context, RetrievalResult
 from .citecheck import strip_citations
 from .llm import BaseLLM
-from .prompts import ANSWER_SYSTEM, MULTIMODAL_SYSTEM, REFUSAL_TEXT, build_answer_prompt
+from .prompts import ANSWER_SYSTEM, CLARIFY_PROMPT, MULTIMODAL_SYSTEM, REFUSAL_TEXT, build_answer_prompt
 
 _CITE = re.compile(r"\[(\d+)\]")
 _IMAGE_CITE = re.compile(r"\[图\s*(\d+)\]")
@@ -40,7 +40,7 @@ class AnswerGenerator:
         payloads = list(image_payloads or []) if vision else []
         query_image = image_b64 if vision else None
         attached = (["用户图片"] if query_image else []) + [f"[图{i + 1}]" for i in range(len(payloads))]
-        prompt = build_answer_prompt(result.query, result.contexts, extra_context=extra_context, images=images, attached=attached if (payloads or (query_image and images)) else None, query_image_note=query_image_note if not query_image else None, reference_notes=reference_notes, memories=memories)
+        prompt = build_answer_prompt(result.query, result.contexts, extra_context=extra_context, images=images, attached=attached if (payloads or (query_image and images)) else None, query_image_note=query_image_note if not query_image else None, reference_notes=reference_notes, memories=memories, low_confidence=self.low_confidence(result))
         msgs: list[dict[str, Any]] = []
         for m in (history or [])[-8:]:
             if m.get("role") in ("user", "assistant") and m.get("content"):
@@ -54,6 +54,29 @@ class AnswerGenerator:
     @staticmethod
     def system_prompt(multimodal: bool) -> str:
         return ANSWER_SYSTEM + (MULTIMODAL_SYSTEM if multimodal else "")
+
+    def low_confidence(self, result: RetrievalResult) -> bool:
+        """精排最高分低于 clarify.below：资料可能只是沾边，提示模型不能确定时反问。只看精排分（织入块、SQL 结果不算）。"""
+        below = self.cfg.clarify.below
+        if below is None or not result.contexts or not result.trace or not result.trace.reranked:
+            return False
+        return result.trace.reranked[0].score < below
+
+    def clarification(self, result: RetrievalResult) -> str | None:
+        """判定库中无答案时的反问：检索到了相近主题，且模型认为用户可能想问其中某个 → 反问文本；否则 None（照常拒答）。"""
+        cfg = self.cfg.clarify
+        near = (result.trace.near_misses if result.trace else None) or []
+        if not cfg.enabled or self.llm is None or not near or not (result.query or "").strip():
+            return None
+        options = "\n".join(f"- {m['label']}：{m.get('snippet', '')}" for m in near[: cfg.max_options + 2])
+        prompt = CLARIFY_PROMPT.format(query=result.query, options=options, n=cfg.max_options)
+        try:
+            text = self.llm.chat([{"role": "user", "content": prompt}], max_tokens=400, thinking=False).text.strip()
+        except Exception:  # 反问失败不能影响拒答
+            return None
+        if not text or "NONE" in text.upper()[:20]:
+            return None
+        return text
 
     def thinking_for(self, result: RetrievalResult) -> bool:
         """回答前要不要让推理模型先思考（generation.llm.thinking）。auto：普通问答不思考——资料已经检索、精排好，
@@ -72,7 +95,8 @@ class AnswerGenerator:
     def answer(self, result: RetrievalResult, *, history: list[dict[str, str]] | None = None, image_b64: str | None = None, extra_context: str | None = None, images: list[Any] | None = None, image_payloads: list[str] | None = None, query_image_note: str | None = None, reference_notes: str | None = None, memories: list[str] | None = None) -> Answer:
         contexts = result.contexts
         if not contexts and not extra_context and not images and not image_b64 and self.cfg.refuse_when_no_context:
-            return Answer(query=result.query, text=REFUSAL_TEXT, refused=True, contexts=[], trace=result.trace)
+            # 反问也算拒答：库里没有能直接回答的资料
+            return Answer(query=result.query, text=self.clarification(result) or REFUSAL_TEXT, refused=True, contexts=[], trace=result.trace)
 
         if self.llm is None:
             return Answer(query=result.query, text=extractive_answer(contexts, images), refused=False, citations=list(range(1, min(3, len(contexts)) + 1)), contexts=contexts, trace=result.trace, model="extractive")
@@ -87,7 +111,7 @@ class AnswerGenerator:
         """流式增量文本；无 LLM 时分片输出抽取式回答（离线体验模式）。"""
         contexts = result.contexts
         if not contexts and not extra_context and not images and not image_b64 and self.cfg.refuse_when_no_context:
-            yield REFUSAL_TEXT
+            yield self.clarification(result) or REFUSAL_TEXT
             return
         if self.llm is None:
             text = extractive_answer(contexts, images)

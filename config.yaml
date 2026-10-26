@@ -134,6 +134,8 @@ retrieval:
   query_transform:
     rewrite: true             # 口语 → 书面检索表达
     multi_query: 3            # 0 = 关闭；扩展 N 个角度，原始问题始终保留
+    multi_query_when: always  # always | low_confidence：先只用原问题检索，精排最高分低于 multi_query_below 才补跑扩展问法
+    multi_query_below: 0.3    # 与 rerank.min_score 同一刻度（bge-reranker-v2-m3：能答的问题 top-1 多在 0.79 以上）
     hyde: true
     hyde_max_query_chars: 30
     decompose: true
@@ -214,6 +216,10 @@ generation:
     thinking: auto            # 推理模型（DeepSeek 等）回答前先思考：auto = 只在多跳 / Agentic 模式思考 | on | off；Claude 看 effort
   cite_sources: true
   refuse_when_no_context: true
+  clarify:
+    enabled: true             # 判定无答案但检索到相近主题时，列出主题反问用户；都不相关才回固定拒答
+    below: null               # 例如 0.3：精排最高分低于它时提示模型"不能确定就反问、不要猜"；与 rerank.min_score 同一刻度
+    max_options: 3
 
 eval:
   golden_set: data/eval/golden_qa.jsonl

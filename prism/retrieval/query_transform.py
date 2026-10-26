@@ -56,6 +56,7 @@ class QueryPlan:
     queries: list[str] = field(default_factory=list)   # 用于 dense + sparse 的所有查询（含原始）
     hyde_document: str | None = None                  # 仅用于 dense
     notes: list[str] = field(default_factory=list)
+    resolved: str = ""                                # 多轮归并后的问题：各项变换以它为准（按需 Multi-Query 补跑时也用它）
 
 
 def has_precise_tokens(query: str) -> bool:
@@ -67,9 +68,10 @@ class QueryTransformer:
         self.cfg = cfg
         self.llm = llm
 
-    def plan(self, query: str, history: list[dict[str, str]] | None = None) -> QueryPlan:
+    def plan(self, query: str, history: list[dict[str, str]] | None = None, *, multi_query: bool = True) -> QueryPlan:
+        """multi_query=False：本次不扩展问法（按需 Multi-Query 的首轮），需要时再调 expand()。"""
         query = query.strip()
-        plan = QueryPlan(original=query, queries=[query] if self.cfg.keep_original else [])
+        plan = QueryPlan(original=query, queries=[query] if self.cfg.keep_original else [], resolved=query)
         if self.llm is None:
             plan.notes.append("no_llm: 跳过查询变换")
             if not plan.queries:
@@ -84,6 +86,7 @@ class QueryTransformer:
                 plan.queries.insert(0, condensed) if not self.cfg.keep_original else plan.queries.append(condensed)
                 plan.notes.append(f"condense: {condensed}")
                 query = condensed
+                plan.resolved = condensed
 
         precise = has_precise_tokens(query)
         if precise:
@@ -96,7 +99,7 @@ class QueryTransformer:
             jobs["rewrite"] = lambda: self._ask(REWRITE_PROMPT.format(query=query), 120)
         if self.cfg.decompose and _MULTI_HOP.search(query):
             jobs["decompose"] = lambda: self._ask_lines(DECOMPOSE_PROMPT.format(query=query), 300)
-        if self.cfg.multi_query > 0:
+        if self.cfg.multi_query > 0 and multi_query:
             jobs["multi_query"] = lambda: self._ask_lines(MULTI_QUERY_PROMPT.format(query=query, n=self.cfg.multi_query), 400)
         if self.cfg.step_back:
             jobs["step_back"] = lambda: self._ask(STEP_BACK_PROMPT.format(query=query), 120)
@@ -142,6 +145,12 @@ class QueryTransformer:
         if not plan.queries:
             plan.queries = [query]
         return plan
+
+    def expand(self, query: str) -> list[str]:
+        """只生成 Multi-Query 的扩展问法（按需 Multi-Query：首轮检索把握不大时补跑）。"""
+        if self.llm is None or self.cfg.multi_query <= 0:
+            return []
+        return self._ask_lines(MULTI_QUERY_PROMPT.format(query=query, n=self.cfg.multi_query), 400)[: self.cfg.multi_query]
 
     # ----------------------------------------------------------------------------------
     def _ask(self, prompt: str, max_tokens: int) -> str:

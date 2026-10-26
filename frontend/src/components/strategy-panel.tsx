@@ -106,6 +106,8 @@ export function StrategyPanel({ mode, onModeChange, value, onChange, topK, onTop
       {section(<Zap size={11} />, '查询层', 'hyde', [
         row('改写 / 压缩 rewrite', sw(['query_transform', 'rewrite']), '口语 → 书面检索表达'),
         row('Multi-Query 数量', num(['query_transform', 'multi_query'], 0, 8), '0 关闭；3-5 个角度分别检索'),
+        row('Multi-Query 时机', select(['query_transform', 'multi_query_when'], [['always', '每次'], ['low_confidence', '把握不大时']], 'always'), '按需：首轮精排最高分低于阈值才补跑'),
+        row('按需扩展阈值', num(['query_transform', 'multi_query_below'], 0, 1, 0.05), '与拒答阈值同一刻度'),
         row('HyDE 假设文档', sw(['query_transform', 'hyde']), '短 query 有效；含精确编号自动跳过'),
         row('多跳分解 decompose', sw(['query_transform', 'decompose'])),
         row('Step-back 抽象', sw(['query_transform', 'step_back'])),

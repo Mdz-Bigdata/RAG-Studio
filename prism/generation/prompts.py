@@ -37,6 +37,22 @@ MULTIMODAL_SYSTEM = """
 
 REFUSAL_TEXT = "根据现有知识库资料无法回答这个问题（未检索到相关内容）。建议补充关键词（如制度名称、产品型号、订单号）后重试，或转人工处理。"
 
+# 判定库中无答案、但检索到了相近主题：让模型判断用户是不是想问其中某个，是就反问，不是就输出 NONE（回到固定拒答）
+CLARIFY_PROMPT = """用户的问题在知识库里没有找到能直接回答的资料，但检索到了下面几个相近的主题。
+请判断：用户是否可能想问其中某个主题（换了说法、说得太笼统、少了限定条件）？
+- 可能：先用一句话说明资料里没有找到能直接回答的内容，再列出用户最可能想问的主题（最多 {n} 个，用下面给出的主题名称，每行一个，以"- "开头），最后请用户确认是哪一个或补充信息。不要回答问题本身，不要编造主题。
+- 这些主题说的都不是用户问的那件事（例如问食堂开饭时间，主题是年假、调休）：只输出 NONE。宁可输出 NONE，也不要硬凑。
+
+<问题>{query}</问题>
+<相近主题>
+{options}
+</相近主题>"""
+
+# 精排最高分偏低（clarify.below）时附在问题前：资料可能只是沾边，宁可反问也不要猜
+LOW_CONFIDENCE_NOTE = """<检索提示>
+本轮资料与问题的匹配度偏低，可能只是相关而没有直接回答。若资料能回答，照常按回答协议作答；若不能确定用户问的是资料里的哪件事（问题太笼统、可能指资料里的不同对象），不要猜，用一句话反问用户，列出资料中相近的 2~3 个主题（每行一个，以"- "开头）请用户选择或补充。
+</检索提示>"""
+
 
 def format_context(ctx: Context, today: date | None = None) -> str:
     """一段资料交给模型时的完整样子：来源 / 版本 / 生效期 / 时效状态 + 正文。
@@ -85,11 +101,13 @@ def build_answer_prompt(
     reference_notes: str | None = None,
     memories: list[str] | None = None,
     today: date | None = None,
+    low_confidence: bool = False,
 ) -> str:
     """images：ImageHit 列表（[图n] 顺序）；attached：随消息附带像素的图片标签，按顺序；
     query_image_note：用户上传了图片但当前模型看不了图时，用 OCR / VLM 描述代替；
     reference_notes：资料之外的参考信息（Agent 湖里相似的历史问答），不编号、不可引用。
-    today：当前日期——模型不知道今天是哪天，"去年""现行""已过期"都要靠它判断。"""
+    today：当前日期——模型不知道今天是哪天，"去年""现行""已过期"都要靠它判断；
+    low_confidence：精排最高分偏低（generation.clarify.below），提示模型不能确定时反问而不是猜。"""
     today = today or date.today()
     parts = [f"<当前日期>{today.isoformat()}</当前日期>", "", "<资料>"]
     for i, ctx in enumerate(contexts, start=1):
@@ -132,6 +150,9 @@ def build_answer_prompt(
                      "不是资料来源：不要引用它，事实性结论仍以 <资料> 为准。")
         parts.extend(f"- {m}" for m in memories)
         parts.append("</用户记忆>")
+        parts.append("")
+    if low_confidence:
+        parts.append(LOW_CONFIDENCE_NOTE)
         parts.append("")
     parts.append(f"<问题>\n{query or '（用户只上传了图片，没有输入文字：请说明这张图片与资料中哪些内容相关）'}\n</问题>")
     parts.append("")

@@ -192,7 +192,7 @@ export interface RetrievalOverrides {
   diversify?: { enabled?: boolean; mmr_lambda?: number };
   granularity?: { return_parents?: boolean; auto_merge_adjacent?: boolean; sentence_window?: number; max_context_tokens?: number; order?: 'score' | 'lost_in_the_middle' };
   compression?: { enabled?: boolean; mode?: 'rule' | 'llm'; ratio?: number; min_tokens?: number };
-  query_transform?: { rewrite?: boolean; multi_query?: number; hyde?: boolean; decompose?: boolean; step_back?: boolean; condense_history?: boolean };
+  query_transform?: { rewrite?: boolean; multi_query?: number; multi_query_when?: 'always' | 'low_confidence'; multi_query_below?: number; hyde?: boolean; decompose?: boolean; step_back?: boolean; condense_history?: boolean };
   graph?: { unweaver_enabled?: boolean; max_weaved?: number };
   multihop?: { enabled?: boolean; max_hops?: number };
   agentic?: { enabled?: boolean; max_steps?: number };
