@@ -677,3 +677,21 @@ textarea.mono { font-family: var(--font-mono); font-size: 12.5px; }
 .fs-doc .fs-grid { display: flex; gap: 16px; } .fs-doc .fs-grid-col { min-width: 0; }
 .fs-doc .fs-placeholder { color: #8f959e; background: #f5f6f7; border-radius: 6px; padding: 8px 12px; margin: 6px 0; font-size: 14px; }
 .fs-doc .fs-mention { color: #245bdb; } .fs-doc .fs-eq { font-family: "Times New Roman", serif; font-style: italic; }
+
+/* ---- 视频检索：关键帧时间标签、片段播放器、时间轴 */
+.img-ts { position: absolute; left: 6px; bottom: 6px; display: inline-flex; align-items: center; gap: 3px; padding: 0 5px; line-height: 17px; border-radius: 5px; font-family: var(--font-mono); font-size: 10.5px; color: #fff; background: rgba(0, 0, 0, 0.62); }
+.video-view { width: 100%; max-height: 62vh; aspect-ratio: 16 / 9; background: #000; border-radius: 10px; display: block; }
+.video-layout { display: grid; gap: 14px; grid-template-columns: minmax(0, 1.45fr) minmax(250px, 1fr); align-items: start; }
+.video-segs { max-height: 460px; overflow-y: auto; padding-right: 2px; }
+.video-seg { display: flex; gap: 10px; padding: 8px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-1); cursor: pointer; transition: border-color var(--transition); }
+.video-seg:hover { border-color: var(--border-strong); }
+.video-seg.on { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent); }
+.video-seg-thumb { position: relative; width: 128px; flex-shrink: 0; aspect-ratio: 16 / 9; border-radius: 6px; overflow: hidden; background: #000; }
+.video-seg-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.video-seg-play { position: absolute; inset: 0; display: grid; place-items: center; color: #fff; opacity: 0; background: rgba(0, 0, 0, 0.35); transition: opacity var(--transition); }
+.video-seg:hover .video-seg-play, .video-seg.on .video-seg-play { opacity: 1; }
+.vtl { position: relative; height: 14px; border-radius: 7px; background: var(--bg-3, var(--border)); cursor: pointer; }
+.vtl-seg { position: absolute; top: 2px; bottom: 2px; padding: 0; border: 0; border-radius: 4px; background: color-mix(in srgb, var(--accent) 55%, transparent); cursor: pointer; }
+.vtl-seg:hover, .vtl-seg.on { background: var(--accent); }
+.vtl-head { position: absolute; top: -3px; bottom: -3px; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--text-1, currentColor); pointer-events: none; }
+@media (max-width: 1100px) { .video-layout { grid-template-columns: minmax(0, 1fr); } .video-segs { max-height: none; } }

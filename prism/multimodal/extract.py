@@ -9,6 +9,7 @@
 - Markdown   ![alt](path "title") 与 <img>：本地相对路径 / data URI（不抓取 http 图片）
 - MinerU     Content List 里的 image / chart / table 块（img_path 指向已落盘的图片）
 - 图片文件   png / jpg / jpeg / webp / bmp / gif / tif 本身就是一张图
+- 视频       按镜头切分，每段一张关键帧（带起止时间），见 video.py
 
 过滤：太小的图（图标 / 分隔线）、同一张图在多页重复出现（logo / 水印）、文档内重复。
 """
@@ -26,6 +27,7 @@ from typing import Any
 
 from ..config import MultimodalConfig
 from ..schemas import BlockType, ParsedDocument
+from .video import VIDEO_EXTENSIONS, extract_video_frames
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +53,10 @@ class ExtractedImage:
     ocr_text: str = ""
     description: str = ""
     meta: dict[str, Any] = field(default_factory=dict)
+    time: float | None = None            # 视频关键帧：帧时刻与所在片段起止（秒）
+    time_start: float | None = None
+    time_end: float | None = None
+    shot: int | None = None              # 视频关键帧所在镜头（硬切处递增）
 
 
 # --------------------------------------------------------------------------------------
@@ -122,6 +128,8 @@ def extract_images(path: Path, doc: ParsedDocument | None, cfg: MultimodalConfig
                 items = _from_pptx(path, cfg)
             elif ext in ("md", "markdown"):
                 items = extract_markdown_images(path.read_text(encoding="utf-8", errors="replace"), path.parent, cfg)
+            elif ext in VIDEO_EXTENSIONS:
+                items = extract_video_frames(path, cfg)
     except Exception as exc:
         logger.warning("图片抽取失败 %s：%s", path.name, exc)
         return []
@@ -134,6 +142,7 @@ def filter_images(items: list[ExtractedImage], cfg: MultimodalConfig) -> list[Ex
         pages_of.setdefault(it.sha1, set()).add(it.page)
     out: list[ExtractedImage] = []
     seen: set[str] = set()
+    limit = max(cfg.max_images_per_doc, cfg.video.max_frames) if any(it.origin == "video" for it in items) else cfg.max_images_per_doc
     for it in items:
         w, h = it.image.size
         if min(w, h) < cfg.min_image_side or w * h < cfg.min_image_area:
@@ -147,8 +156,8 @@ def filter_images(items: list[ExtractedImage], cfg: MultimodalConfig) -> list[Ex
             it.image = it.image.copy()
             it.image.thumbnail((cfg.max_side, cfg.max_side))
         out.append(it)
-        if len(out) >= cfg.max_images_per_doc:
-            logger.info("图片数超过上限 %d，其余忽略", cfg.max_images_per_doc)
+        if len(out) >= limit:
+            logger.info("图片数超过上限 %d，其余忽略", limit)
             break
     return out
 

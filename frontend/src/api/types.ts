@@ -247,7 +247,7 @@ export interface ChatSource extends ContextView {
 }
 
 // ---- 多模态：图片、检索命中、检索响应
-export type MultimodalMode = 'text2image' | 'image2image' | 'hybrid' | 'image2text';
+export type MultimodalMode = 'text2image' | 'image2image' | 'hybrid' | 'image2text' | 'text2video';
 
 export interface ImageView {
   imageId: string;
@@ -265,6 +265,11 @@ export interface ImageView {
   breadcrumb: string;
   anchorChunkId: string | null;
   label: string;
+  // 视频关键帧：帧时刻与所在片段起止（秒），以及所属视频的播放地址
+  time?: number;
+  timeStart?: number;
+  timeEnd?: number;
+  videoUrl?: string;
 }
 
 export interface ImageHitView extends ImageView {
@@ -285,12 +290,27 @@ export interface MultimodalRouteItem {
   label: string;
 }
 
+/** 文搜视频的一条结果：同一视频里一段连续的命中片段。 */
+export interface VideoSegmentView {
+  docId: string;
+  fileName: string | null;
+  videoUrl: string;
+  duration: number | null;
+  start: number;
+  end: number;
+  time: number;            // 代表帧时刻
+  score: number;
+  rank: number;
+  frames: ImageHitView[];  // 片段里命中的关键帧（按时间）
+}
+
 export interface MultimodalResponse {
   mode: MultimodalMode;
   query: string;
   hasImage: boolean;
   images: ImageHitView[];
   contexts: ContextView[];
+  segments: VideoSegmentView[];
   routes: Record<string, MultimodalRouteItem[]>;
   routeLabels: Record<string, string>;
   queryDescription: string;
@@ -308,6 +328,9 @@ export interface MultimodalStatus {
   enabled: boolean;
   images: number;
   documentsWithImages: number;
+  videos: number;
+  videoFrames: number;
+  video: { enabled: boolean; backend: string | null };
   described: number;
   withOcr: number;
   embedder: ImageEmbeddingInfo;

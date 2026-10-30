@@ -376,11 +376,29 @@ class ImageEmbeddingConfig(BaseModel):
     api_key: str | None = None
 
 
+class VideoConfig(BaseModel):
+    """视频检索：视频按镜头切分，每个镜头（长镜头再按画面变化细分）取一张最清晰的关键帧进图片索引，
+    关键帧带着它所在片段的起止时间——文搜视频命中关键帧，就能定位到"哪个视频的第几秒"。需要 ffmpeg 或 opencv。"""
+
+    enabled: bool = True
+    sample_fps: float = 2.0              # 分析用的抽帧频率（每秒几帧）：越高切点越准，解码越慢
+    # 帧差异（0~1）= 颜色分布变化与"内容像素里变了多少"取大者。实测：硬切 / 幻灯片翻页 0.6~1.0，
+    # 同一镜头里物体移动最多到 0.3 左右（主体整个挪了位置），压缩噪声 < 0.05
+    scene_threshold: float = 0.45        # 相邻两帧差异超过它 → 镜头切换（越小切得越碎）
+    drift_threshold: float = 0.4         # 片段内画面相对片段第一帧的差异超过它（摇镜头转向新的主体）→ 新片段
+    max_segment_seconds: float = 10.0    # 片段最长秒数：静止的长镜头被切开后，画面没变的相邻片段会再合并
+    min_segment_seconds: float = 0.8     # 比它短的镜头（闪白 / 转场）并入前一个片段
+    max_frames: int = 200                # 每个视频最多保留的关键帧数（超出时按画面变化程度保留）
+    max_duration_minutes: float = 120.0  # 只分析前 N 分钟
+    segment_gap_seconds: float = 2.0     # 文搜视频：同一镜头里间隔不超过它的命中片段连成一段（跨镜头不连）
+
+
 class MultimodalConfig(BaseModel):
     """多模态 RAG：图片抽取 → OCR / VLM 描述 → 图文向量 + 描述文本双索引 → 文搜图 / 图搜图 / 图文混合 / 图搜文 → 带图片引用的回答。"""
 
     enabled: bool = True
     embedding: ImageEmbeddingConfig = ImageEmbeddingConfig()
+    video: VideoConfig = VideoConfig()
     # --- 抽取
     min_image_side: int = 48             # 短边小于该像素的图（图标 / 分隔线）不入库
     min_image_area: int = 6400           # 面积阈值（像素）

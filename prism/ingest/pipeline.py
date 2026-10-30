@@ -20,6 +20,7 @@ from ..index import Index
 from ..index.table_store import tables_from_blocks
 from ..multimodal.describe import ImageDescriber
 from ..multimodal.extract import IMAGE_EXTENSIONS, ExtractedImage, extract_images
+from ..multimodal.schemas import format_ts
 from ..schemas import Block, BlockType, Chunk, DocMetadata, ParsedDocument
 from .chunking import StructuralChunker
 from .cleaning import clean_document
@@ -180,8 +181,12 @@ class IngestPipeline:
         if not mm.enabled:
             return []
         images = extract_images(path, doc, mm, mineru_out_dir=self.settings.paths.mineru_out_dir)
+        title = doc.metadata.title or path.stem
         for it in images:
-            ocr_text, description = self.describer.describe(it.image, it.sha1, hint=it.caption or it.context[:200])
+            hint = it.caption or it.context[:200]
+            if it.time is not None:
+                hint = f"视频《{title}》{format_ts(it.time)} 处的画面。{it.context[:200]}"
+            ocr_text, description = self.describer.describe(it.image, it.sha1, hint=hint)
             it.ocr_text = it.ocr_text or ocr_text
             # 本系统 VLM 的描述放在前面，解析器自带的文字接在后面。MinerU flash 档给的"图片内容"是图中文字的转写
             # （CLIP 论文实测：图 1~22 全是英文转写），原来"解析器有就不用 VLM"会把 VLM 的中文语义描述整段丢掉，
@@ -191,11 +196,12 @@ class IngestPipeline:
             else:
                 it.description = it.description or description
         self._backfill_scanned_pages(doc, images)
-        if images and not any(b.is_content() and b.type != BlockType.TITLE for b in doc.blocks):
+        if images and images[0].time is not None:
+            self._video_blocks(doc, images, title)
+        elif images and not any(b.is_content() and b.type != BlockType.TITLE for b in doc.blocks):
             # 只有图片、没有正文的文档（图片文件、纯扫描 PDF 在 flash 档）：用每张图的文本摘要当正文，
             # 这样文档能被切片检索，图片也有可挂接的段落。
             is_file = path.suffix.lower().lstrip(".") in IMAGE_EXTENSIONS
-            title = doc.metadata.title or path.stem
             if not any(b.type == BlockType.TITLE for b in doc.blocks):
                 doc.blocks.insert(0, Block(type=BlockType.TITLE, level=1, text=title, page=0))
             for it in images:
@@ -208,6 +214,16 @@ class IngestPipeline:
         if images:
             logger.info("%s：抽取 %d 张图片（OCR=%s，VLM=%s）", path.name, len(images), self.describer.capabilities["ocr"], self.describer.capabilities["vlm"])
         return images
+
+    def _video_blocks(self, doc: ParsedDocument, frames: list[ExtractedImage], title: str) -> None:
+        """视频没有文字层：每个镜头一段正文（时间范围 + 画面描述 + 画面文字 + 字幕），文本检索与问答引用都能定位到时间。"""
+        if not any(b.type == BlockType.TITLE for b in doc.blocks):
+            doc.blocks.insert(0, Block(type=BlockType.TITLE, level=1, text=title))
+        for it in frames:
+            span = f"{format_ts(it.time_start)}–{format_ts(it.time_end)}"
+            body = "\n".join(x for x in (it.description, f"画面中文字：{it.ocr_text}" if it.ocr_text else "", it.context) if x)
+            it.markup = f"视频画面 {span}"       # 图文关联按它找到这一帧所在的段落（context 里只留字幕，免得描述在图片文本里出现两遍）
+            doc.blocks.append(Block(type=BlockType.TEXT, text=f"视频画面 {span}" + (f"\n{body}" if body else ""), meta={"video_time": it.time, "video_start": it.time_start, "video_end": it.time_end}))
 
     # ----------------------------------------------------------------------------------
     def export_popo_inputs(self, path: Path, metadata: DocMetadata | None = None) -> dict[str, Path]:

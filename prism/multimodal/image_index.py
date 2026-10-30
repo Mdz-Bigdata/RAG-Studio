@@ -149,6 +149,7 @@ class ImageIndex:
             records.append(ImageRecord(
                 image_id=f"{doc_id}_img{n:03d}", doc_id=doc_id, file=f"{self.FILES}/{doc_id}/{name}", sha1=it.sha1, width=w, height=h, order=n,
                 page=it.page, bbox=it.bbox, origin=it.origin, doc_title=doc_title, caption=it.caption, ocr_text=it.ocr_text, description=it.description, context_text=it.context,
+                time=it.time, time_start=it.time_start, time_end=it.time_end, shot=it.shot,
             ))
         _link(records, items, chunks)
         for r in records:

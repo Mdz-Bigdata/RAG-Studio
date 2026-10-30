@@ -1,8 +1,9 @@
-// 图片检索结果：缩略图卡片（分数 / 各路排名 / 图注 / 来源）与详情弹窗（大图 + 描述 + OCR + 上下文）。
-import { FileText, Link2, ScanSearch } from 'lucide-react';
+// 图片检索结果：缩略图卡片（分数 / 各路排名 / 图注 / 来源）与详情弹窗（大图 + 描述 + OCR + 上下文）。视频关键帧额外标出时间，详情里直接播放所在片段。
+import { FileText, Film, Link2, Play, ScanSearch } from 'lucide-react';
 import type { ImageHitView, ImageView } from '../api/types';
 import { Badge, Button, Modal, ScoreBar } from './ui';
-import { formatScore } from '../lib/format';
+import { formatScore, formatTs } from '../lib/format';
+import { Timeline, useSegmentPlayback } from './video-results';
 
 export const IMAGE_ROUTE: Record<string, { label: string; tone: string }> = {
   clip: { label: '图文向量', tone: 'dense' },
@@ -20,7 +21,9 @@ export const IMAGE_ROUTE: Record<string, { label: string; tone: string }> = {
 };
 
 export const isHit = (im: ImageView | ImageHitView): im is ImageHitView => 'score' in im;
-const pageOf = (im: ImageView) => (im.page !== null && im.page !== undefined ? `p.${im.page + 1}` : null);
+export const isVideoFrame = (im: ImageView) => im.time !== null && im.time !== undefined;
+const spanOf = (im: ImageView) => `${formatTs(im.timeStart ?? im.time)}–${formatTs(im.timeEnd ?? im.time)}`;
+const pageOf = (im: ImageView) => (isVideoFrame(im) ? spanOf(im) : im.page !== null && im.page !== undefined ? `p.${im.page + 1}` : null);
 const titleOf = (im: ImageView) => im.caption || im.description || im.ocrText || im.contextText || im.fileName || '未命名图片';
 
 export function ImageCard({ image, onOpen, highlighted, compact }: { image: ImageView | ImageHitView; onOpen?: () => void; highlighted?: boolean; compact?: boolean }) {
@@ -30,10 +33,11 @@ export function ImageCard({ image, onOpen, highlighted, compact }: { image: Imag
       <div className="img-thumb">
         <img src={image.url} alt={titleOf(image)} loading="lazy" />
         {hit?.index ? <span className="cite img img-no">图{hit.index}</span> : hit && hit.rank ? <span className="rank img-no">#{hit.rank}</span> : null}
+        {isVideoFrame(image) ? <span className="img-ts" title="视频片段"><Film size={9} />{spanOf(image)}</span> : null}
       </div>
       <div className="img-meta">
         <div className="small clamp-2" title={titleOf(image)}>{titleOf(image)}</div>
-        <div className="xs faint ellipsis row gap-4" title={image.label}><FileText size={10} style={{ flexShrink: 0 }} /><span className="ellipsis">{image.fileName ?? image.docId}</span>{pageOf(image) ? <span>· {pageOf(image)}</span> : null}</div>
+        <div className="xs faint ellipsis row gap-4" title={image.label}>{isVideoFrame(image) ? <Film size={10} style={{ flexShrink: 0 }} /> : <FileText size={10} style={{ flexShrink: 0 }} />}<span className="ellipsis">{image.fileName ?? image.docId}</span>{pageOf(image) && !isVideoFrame(image) ? <span>· {pageOf(image)}</span> : null}</div>
         {hit ? (
           <>
             <div className="row gap-6"><div className="flex-1"><ScoreBar value={hit.score} /></div><span className="mono xs">{formatScore(hit.score)}</span></div>
@@ -57,10 +61,10 @@ export function ImageDetail({ image, onClose, onSearchSimilar }: { image: ImageV
     <Modal wide title={<span className="row gap-8">{hit?.index ? <span className="cite img">图{hit.index}</span> : null}<span className="ellipsis" style={{ maxWidth: 640 }}>{titleOf(image)}</span></span>} onClose={onClose}
       footer={<>{onSearchSimilar ? <Button onClick={() => { onSearchSimilar(image); onClose(); }}><ScanSearch size={13} />以此图搜相似</Button> : null}<a className="btn" href={image.url} target="_blank" rel="noreferrer">查看原图</a><Button variant="primary" onClick={onClose}>关闭</Button></>}>
       <div className="img-detail">
-        <div className="img-detail-view"><img src={image.url} alt={titleOf(image)} /></div>
+        {isVideoFrame(image) && image.videoUrl ? <FramePlayer image={image} /> : <div className="img-detail-view"><img src={image.url} alt={titleOf(image)} /></div>}
         <div className="col gap-12" style={{ minWidth: 0 }}>
           <div className="row gap-6 wrap">
-            <Badge><FileText size={10} />{image.fileName ?? image.docId}</Badge>
+            <Badge>{isVideoFrame(image) ? <Film size={10} /> : <FileText size={10} />}{image.fileName ?? image.docId}</Badge>
             {pageOf(image) ? <Badge mono>{pageOf(image)}</Badge> : null}
             <Badge mono>{image.width}×{image.height}</Badge>
             <Badge mono>{image.origin}</Badge>
@@ -78,5 +82,22 @@ export function ImageDetail({ image, onClose, onSearchSimilar }: { image: ImageV
         </div>
       </div>
     </Modal>
+  );
+}
+
+/** 关键帧详情里的播放器：停在这一帧，"播放片段"从片段起点播到终点。 */
+function FramePlayer({ image }: { image: ImageView }) {
+  const span = { start: image.timeStart ?? image.time ?? 0, end: image.timeEnd ?? image.time ?? 0, time: image.time ?? 0 };
+  const p = useSegmentPlayback([span]);
+  return (
+    <div className="col gap-8" style={{ minWidth: 0 }}>
+      {p.failed ? <div className="img-detail-view"><img src={image.url} alt={titleOf(image)} /></div> : <video className="video-view" src={image.videoUrl} poster={image.url} {...p.videoProps} />}
+      {p.failed ? <div className="xs faint">浏览器无法播放这个视频，显示的是关键帧。</div> : (
+        <>
+          <Timeline spans={[span]} duration={p.duration} now={p.now} active={0} onPick={p.play} onSeek={p.seek} />
+          <div><Button size="xs" onClick={() => p.play(0)}><Play size={11} />播放片段 {spanOf(image)}</Button></div>
+        </>
+      )}
+    </div>
   );
 }

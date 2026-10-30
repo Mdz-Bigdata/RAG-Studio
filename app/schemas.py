@@ -180,7 +180,7 @@ class RetrievalResponse(BaseModel):
 
 
 class MultimodalSearchRequest(BaseModel):
-    mode: Literal["text2image", "image2image", "hybrid", "image2text"] = "text2image"
+    mode: Literal["text2image", "image2image", "hybrid", "image2text", "text2video"] = "text2image"
     query: str | None = None
     imageB64: str | None = None              # data URL 或裸 base64
     topK: int | None = None

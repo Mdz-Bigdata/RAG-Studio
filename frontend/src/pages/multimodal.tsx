@@ -1,11 +1,12 @@
-// 图文检索实验室：文搜图 / 图搜图 / 图文混合 / 图搜文，每一路召回可见；右侧是能力状态与知识库图片库。
+// 图文检索实验室：文搜图 / 图搜图 / 图文混合 / 图搜文 / 文搜视频，每一路召回可见；右侧是能力状态与知识库图片库。
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Clock, FileSearch, Image as ImageIcon, Images, Layers, ScanSearch, Search, Type, Upload, X, Zap } from 'lucide-react';
+import { Clock, FileSearch, Film, Image as ImageIcon, Images, Layers, ScanSearch, Search, Type, Upload, X, Zap } from 'lucide-react';
 import { api } from '../api/client';
 import type { ImageHitView, ImageView, MultimodalMode, MultimodalResponse, MultimodalStatus } from '../api/types';
 import { ContextCard } from '../components/context-card';
 import { IMAGE_ROUTE, ImageCard, ImageDetail } from '../components/image-card';
 import { KbSelect } from '../components/kb-select';
+import { VideoResults } from '../components/video-results';
 import { Badge, Button, Callout, Empty, ScoreBar, Spinner, Tabs } from '../components/ui';
 import { formatScore } from '../lib/format';
 import { useApp } from '../store/app-store';
@@ -17,17 +18,27 @@ const MODES: Record<MultimodalMode, { label: string; icon: React.ReactNode; text
   image2image: { label: '图搜图', icon: <ImageIcon size={13} />, text: false, image: true, desc: '图片 → 相似图片：图像塔编码后按余弦相似度检索，可设阈值过滤' },
   hybrid: { label: '图文混合', icon: <Layers size={13} />, text: true, image: true, desc: '文字 + 图片：score = α·z(text·I) + (1-α)·z(image·I)，在同一向量空间里统一检索（"像这张图，但要……"）' },
   image2text: { label: '图搜文', icon: <FileSearch size={13} />, text: false, image: true, desc: '图片 → 正文段落：图文向量直达 + 相似图片所在段落 + OCR / VLM 转文字再检索' },
+  text2video: { label: '文搜视频', icon: <Film size={13} />, text: true, image: false, desc: '文字 → 视频片段：在视频关键帧上走文搜图的各路召回，命中的镜头按时间合并成片段，点击即从片段起点播放' },
 };
-const EXAMPLES = ['各区域销售额柱状图', '系统架构图', '流程图', '产品外观照片'];
+const EXAMPLES: Partial<Record<MultimodalMode, string[]>> = {
+  text2image: ['各区域销售额柱状图', '系统架构图', '流程图', '产品外观照片'],
+  text2video: ['海边日落', '有人在白板前讲解', '产品特写镜头', '幻灯片上的价格'],
+};
+const PLACEHOLDER: Partial<Record<MultimodalMode, string>> = {
+  image2text: '可选：补充一句文字，和图片一起检索正文',
+  hybrid: '用文字补充或修正图片，例如"同样的图表，但要 2024 年的"',
+  text2image: '描述你要找的图片，例如"各区域销售额柱状图"',
+  text2video: '描述你要找的画面，例如"海边日落""有人在白板前讲解"',
+};
 const CN_COUNT = ['零', '一', '两', '三', '四', '五', '六', '七', '八', '九'];
-const ROUTE_HEAD: Partial<Record<MultimodalMode, string>> = { text2image: '文字 → 图片', image2text: '图片 → 正文段落' };
+const ROUTE_HEAD: Partial<Record<MultimodalMode, string>> = { text2image: '文字 → 图片', image2text: '图片 → 正文段落', text2video: '文字 → 视频关键帧' };
 
 /** 说明按实际参与融合的召回路生成（多模态表开关、图文模型、权重不同，路数就不同）；状态还没返回时用默认说明。 */
 function modeDesc(mode: MultimodalMode, status: MultimodalStatus | null): string {
   const keys = status?.routes?.[mode];
   const head = ROUTE_HEAD[mode];
   if (!head || !keys?.length) return MODES[mode].desc;
-  return `${head}：${keys.map((k) => IMAGE_ROUTE[k]?.label ?? k).join(' + ')}，${CN_COUNT[keys.length] ?? keys.length}路 RRF 融合`;
+  return `${head}：${keys.map((k) => IMAGE_ROUTE[k]?.label ?? k).join(' + ')}，${CN_COUNT[keys.length] ?? keys.length}路 RRF 融合${mode === 'text2video' ? '，命中镜头按时间合并成片段' : ''}`;
 }
 
 function readAsDataUrl(file: Blob): Promise<string> {
@@ -140,7 +151,7 @@ export function MultimodalPage() {
                 <div style={{ position: 'relative' }}>
                   <Search size={15} className="faint" style={{ position: 'absolute', left: 11, top: 10 }} />
                   <input style={{ paddingLeft: 34 }} disabled={!kbId} value={query} onChange={(e) => setQuery(e.target.value)}
-                    placeholder={mode === 'image2text' ? '可选：补充一句文字，和图片一起检索正文' : mode === 'hybrid' ? '用文字补充或修正图片，例如"同样的图表，但要 2024 年的"' : '描述你要找的图片，例如"各区域销售额柱状图"'} />
+                    placeholder={PLACEHOLDER[mode]} />
                 </div>
               ) : null}
               <div className="row gap-12 wrap small muted">
@@ -150,13 +161,19 @@ export function MultimodalPage() {
                 <div className="flex-1" />
                 <Button variant="primary" type="submit" loading={loading} disabled={!kbId}><Zap size={14} />检索</Button>
               </div>
-              {mode === 'text2image' ? <div className="row gap-6 wrap"><span className="xs faint">示例：</span>{EXAMPLES.map((q) => <button type="button" key={q} className="btn xs chip" disabled={!kbId} onClick={() => { setQuery(q); run({ query: q }); }}>{q}</button>)}</div> : null}
+              {EXAMPLES[mode] ? <div className="row gap-6 wrap"><span className="xs faint">示例：</span>{EXAMPLES[mode]!.map((q) => <button type="button" key={q} className="btn xs chip" disabled={!kbId} onClick={() => { setQuery(q); run({ query: q }); }}>{q}</button>)}</div> : null}
             </div>
           </form>
         </div>
 
         <div className="scroll flex-1 col gap-12" style={{ paddingRight: 4 }}>
-          {!kbId ? <div className="card"><Empty icon={<Images size={40} />} title="请先选择知识库" desc="在「知识库」页面上传含图片的 PDF / Word / PPT / Markdown，或直接上传图片文件。" /></div> : !data ? (
+          {!kbId ? <div className="card"><Empty icon={<Images size={40} />} title="请先选择知识库" desc="在「知识库」页面上传含图片的 PDF / Word / PPT / Markdown，或直接上传图片 / 视频文件。" /></div> : !data && mode === 'text2video' ? (
+            <div className="card"><Empty icon={<Film size={40} />} title={status && status.videos === 0 ? '这个知识库里还没有视频' : '文搜视频'} desc={status && !status.video?.backend
+              ? '服务器上没有可用的视频解码器：安装 ffmpeg（推荐，支持字幕与 mkv / avi 预览转码）或 opencv-python 后即可上传视频。'
+              : status && status.videos === 0
+                ? '在「知识库」页面上传 mp4 / mov / webm / mkv 等视频。入库时按镜头切分，每个镜头取一张最清晰的关键帧，生成图文向量、OCR 与语义描述，并带上内嵌字幕。'
+                : '输入一句画面描述，找到视频里对应的镜头：结果按视频分组，时间轴上高亮命中片段，点击即从片段起点播放。'} /></div>
+          ) : !data ? (
             <div className="card"><Empty icon={<ScanSearch size={40} />} title={status && status.images === 0 ? '这个知识库里还没有图片' : '图文检索实验室'} desc={status && status.images === 0
               ? '上传含图片的 PDF / Word / PPT / Markdown，或直接上传 png / jpg 图片。入库时会抽取图片、记录它在文档里的位置，并生成 OCR 文字与语义描述。'
               : '四种检索方式共用同一份图片索引：图文向量（图片与文字在同一空间）、图片描述的文本向量、图片描述的 BM25。选择方式后输入文字或提供图片。'} /></div>
@@ -170,13 +187,15 @@ export function MultimodalPage() {
               ) : null}
               <div className="row between wrap">
                 <Tabs value={tab} onChange={setTab} items={[
-                  { value: 'results', label: data.mode === 'image2text' ? `正文段落（${data.contexts.length}）· 相似图片（${data.images.length}）` : `图片结果（${data.images.length}）` },
+                  { value: 'results', label: data.mode === 'image2text' ? `正文段落（${data.contexts.length}）· 相似图片（${data.images.length}）` : data.mode === 'text2video' ? `视频片段（${data.segments.length}）` : `图片结果（${data.images.length}）` },
                   { value: 'routes', label: `各路召回（${Object.keys(data.routes).length} 路）` },
                 ]} />
                 <div className="row gap-6 wrap"><Clock size={12} className="faint" />{Object.entries(data.timingsMs).map(([k, v]) => <Badge key={k} mono tone={k === 'total' ? 'info' : ''}>{k} {v}ms</Badge>)}</div>
               </div>
 
-              {tab === 'results' ? (
+              {tab === 'results' && data.mode === 'text2video' ? (
+                data.segments.length ? <VideoResults segments={data.segments} onOpenFrame={setDetail} /> : <Callout tone="warn">没有找到相关的视频片段。</Callout>
+              ) : tab === 'results' ? (
                 <>
                   {data.mode === 'image2text' ? (
                     data.contexts.length === 0 ? <Callout tone="warn">没有找到与这张图片相关的正文段落。</Callout> : <div className="col gap-8">{data.contexts.map((c, i) => <ContextCard key={c.chunkId} ctx={c} index={i + 1} />)}</div>
@@ -237,6 +256,10 @@ export function MultimodalPage() {
           <div className="chunk">
             <div className="row between"><span className="xs faint">图片描述（VLM）</span><Badge tone={status?.vision ? 'ok' : 'warn'}>{status?.vision ? '可用' : '未配置'}</Badge></div>
             <div className="xs muted">{status?.vision ? `已为 ${status.described} / ${status.images} 张图生成语义描述` : '在「模型配置」激活多模态模型后，入库时为每张图生成语义描述，问答时模型可直接看图。'}</div>
+          </div>
+          <div className="chunk">
+            <div className="row between"><span className="xs faint">视频检索</span><Badge tone={status.video?.backend && status.video.enabled ? 'ok' : 'warn'}>{!status.video?.enabled ? '已关闭' : status.video.backend ?? '不可用'}</Badge></div>
+            <div className="xs muted">{!status.video?.enabled ? '策略配置 → 多模态 → video.enabled 打开后可上传视频。' : status.video.backend ? `${status.videos} 个视频 · ${status.videoFrames} 个镜头关键帧` : '安装 ffmpeg（推荐）或 opencv-python 后可上传视频：按镜头抽关键帧，文搜视频定位到片段。'}</div>
           </div>
           <div className="chunk">
             <div className="row between"><span className="xs faint">图中文字（OCR）</span><Badge tone={status?.ocr ? 'ok' : 'warn'}>{status?.ocr ?? '未安装'}</Badge></div>

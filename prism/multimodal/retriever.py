@@ -1,4 +1,4 @@
-"""多模态检索器：文搜图 / 图搜图 / 图文混合 / 图搜文。
+"""多模态检索器：文搜图 / 图搜图 / 图文混合 / 图搜文 / 文搜视频。
 
     文搜图   text ─┬─ 图文向量路   CLIP 文本塔 → 图片向量            （语义："一张柱状图"）
                    ├─ 描述向量路   文本向量 → 图片文本摘要向量        （VLM 描述 / 图注 / 上下文）
@@ -10,6 +10,7 @@
                     ├─ 相似图片带出  相似图片所在的段落
                     └─ 描述再检索    OCR / VLM 把查询图转成文字 → 正文的向量 + BM25
                     → RRF 融合 → Small-to-Big
+    文搜视频 同文搜图，只在视频关键帧里检索，命中帧按视频 + 时间合并成连续片段（video.group_segments）
     LanceDB 多模态表（multimodal.lance_table，图片与正文同一张表）：文搜图多一路表内图片文字的全文检索（ICU 分词），
                     图搜文多一路正文行上"查询图 CLIP 向量 + 图中文字"的原生混合检索，都参与上面的 RRF
 
@@ -33,6 +34,7 @@ from ..retrieval.granularity import expand_contexts
 from ..schemas import Context, ScoredChunk
 from .describe import ImageDescriber
 from .schemas import ImageHit, ImageRecord, MultimodalResult, RouteHit
+from .video import group_segments
 
 logger = logging.getLogger(__name__)
 
@@ -107,13 +109,36 @@ class MultimodalRetriever:
         res = self._result("text2image", query=query)
         if not self._ready(res):
             return res
-        allowed = self._allowed(doc_ids)
+        self._text_search(res, query, self._allowed(doc_ids), top_k)
+        res.timings_ms["total"] = (time.perf_counter() - t0) * 1000
+        return res
+
+    def _text_search(self, res: MultimodalResult, query: str, allowed: set[str] | None, top_k: int | None) -> None:
         rankings, weights = self._text_routes(query, allowed, res)
         pinned = self._label_hits(query, allowed, res) or self._exact_id_hits(query, res)
         # 关键词路几乎匹配不上查询（权重被覆盖率压低）时，它的第一名只是噪声，不能拿来和描述向量路"互相印证"
         if not pinned and weights.get("desc_sparse", 0.0) >= 0.5 * self.cfg.weight_desc_sparse:
             pinned = self._text_agreement(rankings, res)
         self._finish_images(res, rankings, weights, top_k, pinned=pinned)
+
+    # --- 文搜视频 -------------------------------------------------------------------------
+    def text_to_video(self, query: str, *, top_k: int | None = None, doc_ids: list[str] | None = None) -> MultimodalResult:
+        """文字 → 视频片段：只在视频关键帧里走文搜图的各路召回，命中的关键帧再按视频、按时间合并成连续片段。
+        res.images 是命中的关键帧（各路召回可见），res.segments 是片段（起止时间 + 代表帧时刻）。"""
+        t0 = time.perf_counter()
+        res = self._result("text2video", query=query)
+        videos = {r.doc_id for r in self.images.records.values() if r.is_video}
+        if doc_ids is not None:
+            videos &= set(doc_ids)
+        if not videos:
+            res.notes.append("知识库里还没有可检索的视频：上传 mp4 / mov / webm / mkv 等视频文件，入库时按镜头抽取关键帧")
+            return res
+        if not self._ready(res):
+            return res
+        top_k = top_k or self.cfg.top_k
+        # 多取一些关键帧：相邻镜头会合并成一段，取少了片段边界不完整
+        self._text_search(res, query, self._allowed(videos), max(top_k * 4, self.cfg.top_n_per_route))
+        res.segments = group_segments(res.images, gap=self.cfg.video.segment_gap_seconds, top_k=top_k)
         res.timings_ms["total"] = (time.perf_counter() - t0) * 1000
         return res
 

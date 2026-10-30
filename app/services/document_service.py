@@ -19,6 +19,7 @@ from typing import Any
 from prism.corpus.metadata import FIELDS, apply_metadata, extract_metadata
 from prism.ingest.parsers.mineru_parser import mineru_available
 from prism.ingest.quick_text import extract_text
+from prism.multimodal.video import preview_path
 from prism.schemas import DocMetadata, ParsedDocument
 
 from ..config import app_config
@@ -360,11 +361,13 @@ class DocumentService:
             idx.remove_document(doc_id)
             index_service.save(kb_id, idx)
         _lake_event(doc_id, "delete", before_md, "", info=info)
-        if path and Path(path).exists():
-            try:
-                Path(path).unlink()
-            except OSError:
-                pass
+        if path:
+            # 视频的浏览器预览（mkv / avi 转出的 mp4）和原文件放在一起
+            for p in (Path(path), preview_path(Path(path))):
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     # --- 切片预览 ---------------------------------------------------------------------
     def chunks(self, doc_id: str) -> list[dict]:

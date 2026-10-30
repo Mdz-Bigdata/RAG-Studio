@@ -1,4 +1,4 @@
-"""多模态检索服务：文搜图 / 图搜图 / 图文混合 / 图搜文，图片库浏览，以及问答里的图片侧。"""
+"""多模态检索服务：文搜图 / 图搜图 / 图文混合 / 图搜文 / 文搜视频，图片库浏览，视频播放，以及问答里的图片侧。"""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from prism.multimodal import ImageDescriber, ImageHit, ImageRecord, MultimodalResult, MultimodalRetriever, decode_image_b64, image_to_base64
+from prism.multimodal.schemas import VideoSegment
+from prism.multimodal.video import is_video, playable_path, video_backend
 from prism.schemas import Context
 
 from ..config import app_config
@@ -81,6 +83,10 @@ class MultimodalService:
             if image is None:
                 raise ValueError("图搜文需要上传图片")
             result = r.image_to_text(image, query=query, top_k=top_k)
+        elif mode == "text2video":
+            if not query:
+                raise ValueError("文搜视频需要输入文字")
+            result = r.text_to_video(query, top_k=top_k, doc_ids=doc_ids)
         else:
             raise ValueError(f"未知检索模式：{mode}")
         return self.to_response(kb_id, result)
@@ -89,12 +95,34 @@ class MultimodalService:
     def image_url(self, kb_id: str, image_id: str) -> str:
         return f"{app_config.api_prefix}/multimodal/{kb_id}/images/{image_id}/file"
 
+    def video_url(self, kb_id: str, doc_id: str) -> str:
+        return f"{app_config.api_prefix}/multimodal/{kb_id}/videos/{doc_id}/file"
+
     def record_view(self, kb_id: str, rec: ImageRecord, names: dict[str, str]) -> dict[str, Any]:
-        return {
+        view = {
             "imageId": rec.image_id, "docId": rec.doc_id, "fileName": names.get(rec.doc_id), "url": self.image_url(kb_id, rec.image_id),
             "page": rec.page, "width": rec.width, "height": rec.height, "origin": rec.origin, "caption": rec.caption, "description": rec.description,
             "ocrText": rec.ocr_text, "contextText": rec.context_text, "breadcrumb": rec.breadcrumb_text, "anchorChunkId": rec.anchor_chunk_id, "label": rec.label(),
         }
+        if rec.is_video:
+            view.update({"time": rec.time, "timeStart": rec.time_start, "timeEnd": rec.time_end, "videoUrl": self.video_url(kb_id, rec.doc_id)})
+        return view
+
+    def segment_view(self, kb_id: str, seg: VideoSegment, names: dict[str, str], durations: dict[str, float]) -> dict[str, Any]:
+        return {
+            "docId": seg.doc_id, "fileName": names.get(seg.doc_id), "videoUrl": self.video_url(kb_id, seg.doc_id), "duration": durations.get(seg.doc_id),
+            "start": seg.start, "end": seg.end, "time": seg.time, "score": round(seg.score, 4), "rank": seg.rank,
+            "frames": [self.hit_view(kb_id, h, names) for h in seg.hits],
+        }
+
+    @staticmethod
+    def video_durations(index) -> dict[str, float]:
+        """每个视频的时长：取最后一个片段的结束时间（关键帧只覆盖分析过的部分，足够画时间轴）。"""
+        out: dict[str, float] = {}
+        for r in index.images.records.values():
+            if r.is_video:
+                out[r.doc_id] = max(out.get(r.doc_id, 0.0), r.time_end or r.time or 0.0)
+        return out
 
     def hit_view(self, kb_id: str, hit: ImageHit, names: dict[str, str], index: int | None = None) -> dict[str, Any]:
         view = self.record_view(kb_id, hit.record, names)
@@ -108,6 +136,7 @@ class MultimodalService:
 
         index = index_service.get(kb_id)
         names = retrieval_service.doc_names(kb_id)
+        durations = self.video_durations(index) if result.segments else {}
 
         def route_item(chunk_id: str, score: float, rank: int) -> dict[str, Any]:
             rec = index.images.get(chunk_id)
@@ -122,6 +151,7 @@ class MultimodalService:
             "hasImage": result.has_image,
             "images": [self.hit_view(kb_id, h, names) for h in result.images],
             "contexts": [context_view(c, names) for c in result.contexts],
+            "segments": [self.segment_view(kb_id, s, names, durations) for s in result.segments],
             "routes": {k: [route_item(x.chunk_id, x.score, x.rank) for x in v[:10]] for k, v in result.routes.items()},
             "routeLabels": {k: ROUTE_LABELS.get(k, k) for k in result.routes},
             "queryDescription": result.query_description,
@@ -139,6 +169,17 @@ class MultimodalService:
         recs = sorted(index.images.records.values(), key=lambda r: (r.doc_id, r.order))
         return [self.record_view(kb_id, r, names) for r in recs if not doc_id or r.doc_id == doc_id]
 
+    def video_path(self, kb_id: str, doc_id: str) -> Path | None:
+        """视频文档的可播放文件（浏览器放不了的格式用入库时转好的预览 mp4）。"""
+        with SessionLocal() as db:
+            doc = Repository(db).get_document(doc_id)
+            if doc is None or doc.kb_id != kb_id or not doc.file_path or not is_video(doc.file_path):
+                return None
+            path = Path(doc.file_path)
+        root = app_config.upload_dir.resolve()
+        p = playable_path(path)
+        return p if p is not None and root in p.resolve().parents else None
+
     def image_path(self, kb_id: str, image_id: str) -> Path | None:
         index = index_service.get(kb_id)
         rec = index.images.get(image_id)
@@ -151,8 +192,10 @@ class MultimodalService:
         index = index_service.get(kb_id)
         s = settings_service.get().multimodal
         rt = model_service.status()
+        frames = [r for r in index.images.records.values() if r.is_video]
         return {
             "enabled": s.enabled, "images": len(index.images), "documentsWithImages": len({r.doc_id for r in index.images.records.values()}),
+            "videos": len({r.doc_id for r in frames}), "videoFrames": len(frames), "video": {"enabled": s.video.enabled, "backend": video_backend()},
             "described": sum(1 for r in index.images.records.values() if r.description), "withOcr": sum(1 for r in index.images.records.values() if r.ocr_text),
             "embedder": rt["imageEmbedding"], "indexEmbedder": index.images.stats(), "vision": rt["vision"], "ocr": rt["ocr"],
             "defaults": {"topK": s.top_k, "alpha": s.hybrid_alpha, "minScore": s.min_score, "rrfK": s.rrf_k},
@@ -170,7 +213,7 @@ class MultimodalService:
                                ("desc_sparse", s.weight_desc_sparse > 0), ("lance_mm", lance)) if on]
         i2t = [k for k, on in (("clip:image→chunk", cross_modal and s.weight_clip > 0), ("neighbor:image→image→chunk", has_images),
                                ("caption:dense", True), ("caption:sparse", True), ("lance_mm:image→text", lance and cross_modal)) if on]
-        return {"text2image": t2i, "image2text": i2t}
+        return {"text2image": t2i, "image2text": i2t, "text2video": t2i}
 
     # --- 问答 -----------------------------------------------------------------------------
     def images_for_answer(self, kb_id: str, query: str, contexts: list[Context], *, doc_ids: set[str] | None = None) -> tuple[list[ImageHit], MultimodalResult]:

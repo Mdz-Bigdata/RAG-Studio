@@ -63,3 +63,12 @@ export function routeLabel(route: string): string {
   const qLabel = q && q.startsWith('q') ? `查询 ${Number(q.slice(1)) + 1}` : q === 'hyde' ? '假设文档' : '';
   return `${hop}${ROUTE_LABEL[kind] ?? kind}${qLabel ? ` · ${qLabel}` : ''}`;
 }
+
+/** 秒 → mm:ss（满一小时 h:mm:ss），与后端 format_ts 一致；舍去小数，与浏览器播放器的读数对得上。 */
+export function formatTs(sec: number | null | undefined): string {
+  if (sec === null || sec === undefined || Number.isNaN(sec)) return '—';
+  const s = Math.max(0, Math.floor(sec));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return h ? `${h}:${pad(m)}:${pad(r)}` : `${pad(m)}:${pad(r)}`;
+}
