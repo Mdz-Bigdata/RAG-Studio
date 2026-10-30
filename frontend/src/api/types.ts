@@ -247,7 +247,7 @@ export interface ChatSource extends ContextView {
 }
 
 // ---- 多模态：图片、检索命中、检索响应
-export type MultimodalMode = 'text2image' | 'image2image' | 'hybrid' | 'image2text' | 'text2video';
+export type MultimodalMode = 'text2image' | 'image2image' | 'hybrid' | 'image2text' | 'text2video' | 'image2video';
 
 export interface ImageView {
   imageId: string;
@@ -322,6 +322,7 @@ export interface MultimodalResponse {
 export interface ImageEmbeddingInfo extends RuntimeInfo {
   crossModal: boolean;
   loaded: boolean;
+  videoNative?: boolean;   // 全模态模型（WeMM）：视频片段整段编码，文搜视频 / 图搜视频多一路视频向量
 }
 
 export interface MultimodalStatus {
@@ -330,15 +331,61 @@ export interface MultimodalStatus {
   documentsWithImages: number;
   videos: number;
   videoFrames: number;
-  video: { enabled: boolean; backend: string | null };
+  video: { enabled: boolean; backend: string | null; vectors?: number; jointVectors?: number };   // vectors / jointVectors：WeMM 视频片段向量（其中带字幕的）
   described: number;
   withOcr: number;
   embedder: ImageEmbeddingInfo;
-  indexEmbedder: { images: number; image_embedder: string | null; image_model: string | null; cross_modal: boolean | null; chunk_clip: number };
+  indexEmbedder: { images: number; image_embedder: string | null; image_model: string | null; cross_modal: boolean | null; chunk_clip: number; video_vectors?: number; video_joint_vectors?: number };
   vision: boolean;
   ocr: string | null;
   defaults: { topK: number; alpha: number; minScore: number | null; rrfK: number };
   routes?: Partial<Record<MultimodalMode, string[]>>;   // 各检索方式实际参与融合的召回路（随开关 / 模型变化）
+}
+
+/** 相似内容 / 单条查重：某张图（或视频关键帧）的相似图片，以及某个视频的相似视频。 */
+export interface SimilarImageView extends ImageView {
+  score: number;
+  rank: number;
+  duplicate: boolean;      // 相似度 ≥ 判重阈值
+}
+
+export interface SimilarVideoView {
+  docId: string;
+  fileName: string | null;
+  videoUrl: string;
+  score: number;           // 整体相似度
+  overlap: number;         // 片段重合度 0..1
+  duplicate: boolean;
+  cover: string | null;
+  pairs: { source: ImageView; match: ImageView; score: number }[];   // 源视频片段 ↔ 对方最像的片段
+}
+
+export interface SimilarResponse {
+  imageId: string | null;
+  docId: string | null;
+  threshold: number;
+  embedder: Record<string, unknown>;
+  images: SimilarImageView[];
+  videos: SimilarVideoView[];
+}
+
+export interface DuplicateVideoItem {
+  docId: string;
+  fileName: string | null;
+  videoUrl: string;
+  cover: string | null;
+}
+
+export type DuplicateGroup = { kind: 'image'; score: number; items: ImageView[] } | { kind: 'video'; score: number; items: DuplicateVideoItem[] };
+
+/** 全库查重：images / videos 是扫描的数量，groups 是找到的重复组。 */
+export interface DuplicatesResponse {
+  threshold: number;
+  overlap: number;
+  embedder: Record<string, unknown>;
+  images: number;
+  videos: number;
+  groups: DuplicateGroup[];
 }
 
 export interface ImageSearchInfo {

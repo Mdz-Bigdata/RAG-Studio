@@ -57,6 +57,9 @@ class ExtractedImage:
     time_start: float | None = None
     time_end: float | None = None
     shot: int | None = None              # 视频关键帧所在镜头（硬切处递增）
+    clip: list[bytes] = field(default_factory=list)          # 视频片段的采样帧（JPEG），供能直接编码视频的模型整段编码
+    clip_times: list[float] = field(default_factory=list)    # 各采样帧相对片段开头的秒数
+    subtitle: str = ""                   # 片段内的字幕 / 台词原文
 
 
 # --------------------------------------------------------------------------------------

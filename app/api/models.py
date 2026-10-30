@@ -33,6 +33,10 @@ PROVIDERS = [
     {"name": "本地 sentence-transformers", "type": "local", "baseUrl": None, "categories": ["embedding", "rerank"], "models": {"embedding": ["BAAI/bge-m3", "BAAI/bge-large-zh-v1.5"], "rerank": ["BAAI/bge-reranker-v2-m3", "BAAI/bge-reranker-base"]}},
     {"name": "本地 CLIP（transformers）", "type": "local", "baseUrl": None, "categories": ["image_embedding"], "models": {"image_embedding": ["OFA-Sys/chinese-clip-vit-base-patch16", "OFA-Sys/chinese-clip-vit-large-patch14", "openai/clip-vit-base-patch32"]}},
     {"name": "Jina 多模态向量 API", "type": "api", "baseUrl": "https://api.jina.ai/v1", "categories": ["image_embedding"], "models": {"image_embedding": ["jina-clip-v2"]}},
+    # WeMM-Embedding：文本 / 图片 / 视频同一空间（文搜视频片段、视频 + 字幕双向量、图搜商品视频）。本地需要 transformers≥5.2，
+    # 无 GPU 时很慢；生产建议 GPU 机器上 vllm serve <model> --runner pooling，再用下面的 vLLM 预设接入
+    {"name": "本地 WeMM-Embedding（transformers）", "type": "local", "baseUrl": None, "categories": ["image_embedding"], "models": {"image_embedding": ["tencent/WeMM-Embedding-2B", "tencent/WeMM-Embedding-4B", "tencent/WeMM-Embedding-9B"]}},
+    {"name": "WeMM-Embedding（vLLM 部署）", "type": "api", "baseUrl": "http://localhost:8001/v1", "categories": ["image_embedding"], "models": {"image_embedding": ["tencent/WeMM-Embedding-2B", "tencent/WeMM-Embedding-4B", "tencent/WeMM-Embedding-9B"]}},
     {"name": "自定义", "type": "openai_compatible", "baseUrl": "", "categories": ["text", "embedding", "multimodal", "rerank"], "models": {}},
 ]
 

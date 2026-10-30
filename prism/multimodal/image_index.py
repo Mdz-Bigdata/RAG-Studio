@@ -6,11 +6,14 @@
     <index_dir>/image_index/desc/                  "图片文本摘要"的文本向量（与正文同一个文本向量模型）
     <index_dir>/image_index/bm25_corpus.jsonl      "图片文本摘要"的 BM25
     <index_dir>/image_index/chunk_clip/            正文 child 块在图文空间里的文本向量（图搜文直达路，仅跨模态模型）
+    <index_dir>/images/<doc_id>/<NNN>_clip/<kk>.jpg 视频片段的采样帧
+    <index_dir>/image_index/video/                 视频片段的"纯视频"向量（仅能直接编码视频的模型，如 WeMM；按关键帧的 image_id 存）
+    <index_dir>/image_index/video_joint/           视频片段的"视频 + 字幕"向量（没有字幕的片段与纯视频向量相同）
 
 向量模型换了怎么办：原图就在磁盘上，加载时发现签名不一致会自动重算向量，不需要重新解析文档。
 
-向量后端是 LanceDB（vector_store.backend: lancedb）时，visual / desc / chunk_clip 三份向量改存在知识库的 LanceDB 库里
-（表 img_visual / img_desc / img_chunk_clip），记录（images.jsonl）、原图文件与图片文本 BM25 不变；
+向量后端是 LanceDB（vector_store.backend: lancedb）时，visual / desc / chunk_clip / video / video_joint 向量改存在知识库的 LanceDB 库里
+（表 img_<名字>），记录（images.jsonl）、原图文件与图片文本 BM25 不变；
 切换后、知识库重建之前，已有的 numpy 向量文件照常加载使用。
 """
 
@@ -42,6 +45,7 @@ _BIGRAM_SKIP = set(" \n\t，。、；：,.;:()（）[]【】")
 class ImageIndex:
     SUBDIR = "image_index"
     FILES = "images"
+    STORES = ("visual", "desc", "chunk_clip", "video", "video_joint")
 
     def __init__(self, directory: Path, *, embedder_factory: Callable[[], BaseImageEmbedder], text_embedder: BaseEmbedder, sparse_cfg: SparseConfig, lance_cfg: LanceDBConfig | None = None) -> None:
         self.directory = Path(directory)
@@ -54,6 +58,8 @@ class ImageIndex:
         self.visual = self._new_store("visual")
         self.desc = self._new_store("desc")
         self.chunk_clip = self._new_store("chunk_clip")
+        self.video = self._new_store("video")
+        self.video_joint = self._new_store("video_joint")
         self.bm25 = BM25Store(sparse_cfg)
         self._meta: dict[str, Any] = {}
         self._checked = False
@@ -103,10 +109,15 @@ class ImageIndex:
             self._reembed_desc(list(self.records.values()))
         built = self._meta.get("visual") or {}
         sig = self.embedder.signature()
-        if (built.get("embedder"), built.get("model")) != (sig["embedder"], sig["model"]) or len(self.visual) != len(self.records):
+        # 维度只在两边都已知时比较（API 模型第一次调用前 dim 还是 0）：同一个模型换了 Matryoshka 维度也要重算
+        changed = (built.get("embedder"), built.get("model")) != (sig["embedder"], sig["model"]) or bool(built.get("dim") and sig["dim"] and built["dim"] != sig["dim"])
+        if changed or len(self.visual) != len(self.records):
             logger.info("图文向量模型已更换（%s → %s），重算 %d 张图片的向量", built.get("model"), sig["model"], len(self.records))
             self._reembed_visual()
             self.chunk_clip = self._new_store("chunk_clip", fresh=True)
+        clips = [r for r in self.records.values() if r.clip]
+        if changed or (self.embedder.video_native and len(self.video) != len(clips)) or (not self.embedder.video_native and len(self.video)):
+            self._reembed_video()
 
     def _reembed_visual(self) -> None:
         from PIL import Image
@@ -120,6 +131,40 @@ class ImageIndex:
                 images.append(Image.open(p).convert("RGB"))
         if ids:
             self.visual.add(ids, self.embedder.embed_images(images))
+
+    def _reembed_video(self) -> None:
+        """视频片段向量：用磁盘上的采样帧整段重算；模型不能直接编码视频时清空（向量不在同一空间）。"""
+        self.video = self._new_store("video", fresh=True)
+        self.video_joint = self._new_store("video_joint", fresh=True)
+        if not self.embedder.video_native:
+            return
+        recs = [r for r in self.records.values() if r.clip]
+        if recs:
+            logger.info("重算 %d 个视频片段的视频向量", len(recs))
+            self._add_video([r.image_id for r in recs], [self._clip_of(r) for r in recs])
+
+    def _clip_of(self, rec: ImageRecord) -> Any:
+        from .wemm import VideoClip
+
+        frames = []
+        for f in rec.clip:
+            try:
+                frames.append(_open_rgb(self.directory / f))
+            except OSError:
+                pass
+        return VideoClip(frames=frames or [self.load_image(rec)], times=list(rec.clip_times[: len(frames)]) if frames else [0.0], text=rec.subtitle)
+
+    def _add_video(self, ids: list[str], clips: list[Any]) -> None:
+        """视频向量失败（显存 / 内存不够、解码出错）不影响入库：关键帧的图片向量、描述、字幕各路照常可用。"""
+        try:
+            video, joint = self.embedder.embed_videos(clips)  # type: ignore[attr-defined]
+        except Exception as exc:
+            logger.warning("视频片段向量计算失败（%d 个片段），文搜视频只走关键帧各路：%s", len(ids), exc)
+            return
+        self.video.add(ids, video)
+        # 没有字幕的片段，"视频 + 字幕"向量就是纯视频向量（模型对"视频 + 空文本"的输出）。不能只存带字幕的片段：
+        # 那样这一路永远在少数几个带字幕的片段里排名，无关的问题也会把它们顶到第一（实测"饼图"被投给了柱状图那段）
+        self.video_joint.add(ids, joint if joint is not None else video)
 
     def _reembed_desc(self, records: list[ImageRecord]) -> None:
         if not records:
@@ -150,11 +195,15 @@ class ImageIndex:
                 image_id=f"{doc_id}_img{n:03d}", doc_id=doc_id, file=f"{self.FILES}/{doc_id}/{name}", sha1=it.sha1, width=w, height=h, order=n,
                 page=it.page, bbox=it.bbox, origin=it.origin, doc_title=doc_title, caption=it.caption, ocr_text=it.ocr_text, description=it.description, context_text=it.context,
                 time=it.time, time_start=it.time_start, time_end=it.time_end, shot=it.shot,
+                clip=_save_clip(it.clip, out_dir / f"{n:03d}_clip", f"{self.FILES}/{doc_id}/{n:03d}_clip"), clip_times=list(it.clip_times), subtitle=it.subtitle,
             ))
         _link(records, items, chunks)
         for r in records:
             self.records[r.image_id] = r
         self.visual.add([r.image_id for r in records], self.embedder.embed_images([it.image for it in items]))
+        clips = [r for r in records if r.clip]
+        if clips and self.embedder.video_native:
+            self._add_video([r.image_id for r in clips], [self._clip_of(r) for r in clips])
         self._reembed_desc(records)
         return records
 
@@ -173,6 +222,8 @@ class ImageIndex:
                 del self.records[i]
             self.visual.remove(ids)
             self.desc.remove(ids)
+            self.video.remove(ids)
+            self.video_joint.remove(ids)
             self._rebuild_bm25()
         if delete_files:
             shutil.rmtree(self.directory / self.FILES / doc_id, ignore_errors=True)
@@ -220,9 +271,7 @@ class ImageIndex:
         return self.directory / record.file
 
     def load_image(self, record: ImageRecord) -> Any:
-        from PIL import Image
-
-        return Image.open(self.path_of(record)).convert("RGB")
+        return _open_rgb(self.path_of(record))
 
     # --- 持久化 ---------------------------------------------------------------------------
     def save(self, directory: Path | None = None) -> None:
@@ -233,9 +282,8 @@ class ImageIndex:
         with (d / "images.jsonl").open("w", encoding="utf-8") as f:
             for r in self.records.values():
                 f.write(r.model_dump_json() + "\n")
-        self.visual.save(d / "visual")
-        self.desc.save(d / "desc")
-        self.chunk_clip.save(d / "chunk_clip")
+        for name in self.STORES:
+            getattr(self, name).save(d / name)
         self.bm25.save(d)
         meta = {"images": len(self.records), "text": self._text_signature(), "visual": self._embedder.signature() if self._embedder is not None else self._meta.get("visual")}
         (d / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -252,7 +300,7 @@ class ImageIndex:
                 if line.strip():
                     r = ImageRecord.model_validate_json(line)
                     idx.records[r.image_id] = r
-        for name in ("visual", "desc", "chunk_clip"):
+        for name in cls.STORES:
             store = getattr(idx, name)
             # numpy 模式照旧读文件；LanceDB 模式下表还空着（切换后还没重建）就先沿用旧的 numpy 文件
             if (d / name / "vectors.npy").exists() and (isinstance(store, NumpyVectorStore) or not len(store)):
@@ -264,7 +312,8 @@ class ImageIndex:
 
     def stats(self) -> dict[str, Any]:
         visual = self._embedder.signature() if self._embedder is not None else (self._meta.get("visual") or {})
-        return {"images": len(self.records), "image_embedder": visual.get("embedder"), "image_model": visual.get("model"), "cross_modal": visual.get("cross_modal"), "chunk_clip": len(self.chunk_clip), "image_store": self.store_backend}
+        return {"images": len(self.records), "image_embedder": visual.get("embedder"), "image_model": visual.get("model"), "cross_modal": visual.get("cross_modal"), "chunk_clip": len(self.chunk_clip),
+                "video_vectors": len(self.video), "video_joint_vectors": len(self.video_joint), "image_store": self.store_backend}
 
 
 # --------------------------------------------------------------------------------------
@@ -278,6 +327,25 @@ def _save_image(image: Any, stem: Path) -> str:
         path = stem.with_suffix(".png")
         image.save(path, format="PNG", optimize=True)
     return path.name
+
+
+def _save_clip(frames: list[bytes], directory: Path, rel: str) -> list[str]:
+    """视频片段的采样帧（已是 JPEG）原样落盘，返回相对索引目录的路径。"""
+    if not frames:
+        return []
+    directory.mkdir(parents=True, exist_ok=True)
+    out = []
+    for k, data in enumerate(frames):
+        (directory / f"{k:02d}.jpg").write_bytes(data)
+        out.append(f"{rel}/{k:02d}.jpg")
+    return out
+
+
+def _open_rgb(path: Path) -> Any:
+    from PIL import Image
+
+    with Image.open(path) as im:
+        return im.convert("RGB")
 
 
 def _bigrams(text: str) -> set[str]:

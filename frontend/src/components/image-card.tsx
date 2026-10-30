@@ -1,5 +1,5 @@
-// 图片检索结果：缩略图卡片（分数 / 各路排名 / 图注 / 来源）与详情弹窗（大图 + 描述 + OCR + 上下文）。视频关键帧额外标出时间，详情里直接播放所在片段。
-import { FileText, Film, Link2, Play, ScanSearch } from 'lucide-react';
+// 图片检索结果：缩略图卡片（分数 / 各路排名 / 图注 / 来源）与详情弹窗（大图 + 描述 + OCR + 上下文）。视频关键帧额外标出时间，详情里直接播放所在片段；卡片与详情都可以打开「相似 / 查重」。
+import { CopyCheck, FileText, Film, Link2, Play, ScanSearch } from 'lucide-react';
 import type { ImageHitView, ImageView } from '../api/types';
 import { Badge, Button, Modal, ScoreBar } from './ui';
 import { formatScore, formatTs } from '../lib/format';
@@ -18,15 +18,19 @@ export const IMAGE_ROUTE: Record<string, { label: string; tone: string }> = {
   'caption:sparse': { label: '图转文·BM25', tone: 'sparse' },
   lance_mm: { label: 'LanceDB·全文', tone: 'sparse' },
   'lance_mm:image→text': { label: 'LanceDB·图→文', tone: 'fused' },
+  video: { label: '视频向量', tone: 'fused' },
+  video_joint: { label: '视频+字幕', tone: 'fused' },
+  'video:image→video': { label: '图→视频', tone: 'fused' },
 };
 
 export const isHit = (im: ImageView | ImageHitView): im is ImageHitView => 'score' in im;
 export const isVideoFrame = (im: ImageView) => im.time !== null && im.time !== undefined;
-const spanOf = (im: ImageView) => `${formatTs(im.timeStart ?? im.time)}–${formatTs(im.timeEnd ?? im.time)}`;
+export const spanOf = (im: ImageView) => `${formatTs(im.timeStart ?? im.time)}–${formatTs(im.timeEnd ?? im.time)}`;
 const pageOf = (im: ImageView) => (isVideoFrame(im) ? spanOf(im) : im.page !== null && im.page !== undefined ? `p.${im.page + 1}` : null);
-const titleOf = (im: ImageView) => im.caption || im.description || im.ocrText || im.contextText || im.fileName || '未命名图片';
+export const titleOf = (im: ImageView) => im.caption || im.description || im.ocrText || im.contextText || im.fileName || '未命名图片';
 
-export function ImageCard({ image, onOpen, highlighted, compact }: { image: ImageView | ImageHitView; onOpen?: () => void; highlighted?: boolean; compact?: boolean }) {
+/** onSimilar：缩略图右上角悬停出现的「相似 / 查重」按钮；extra：追加在卡片底部的内容（如"重复"标记）。 */
+export function ImageCard({ image, onOpen, onSimilar, highlighted, compact, extra }: { image: ImageView | ImageHitView; onOpen?: () => void; onSimilar?: () => void; highlighted?: boolean; compact?: boolean; extra?: React.ReactNode }) {
   const hit = isHit(image) ? image : null;
   return (
     <div className={`img-card ${highlighted ? 'hl' : ''} ${compact ? 'compact' : ''}`} onClick={onOpen} id={hit?.index ? `img-${hit.index}` : undefined} role={onOpen ? 'button' : undefined}>
@@ -34,6 +38,7 @@ export function ImageCard({ image, onOpen, highlighted, compact }: { image: Imag
         <img src={image.url} alt={titleOf(image)} loading="lazy" />
         {hit?.index ? <span className="cite img img-no">图{hit.index}</span> : hit && hit.rank ? <span className="rank img-no">#{hit.rank}</span> : null}
         {isVideoFrame(image) ? <span className="img-ts" title="视频片段"><Film size={9} />{spanOf(image)}</span> : null}
+        {onSimilar ? <button type="button" className="btn icon xs img-act" title="相似 / 查重" aria-label="相似 / 查重" onClick={(e) => { e.stopPropagation(); onSimilar(); }}><CopyCheck size={11} /></button> : null}
       </div>
       <div className="img-meta">
         <div className="small clamp-2" title={titleOf(image)}>{titleOf(image)}</div>
@@ -49,17 +54,18 @@ export function ImageCard({ image, onOpen, highlighted, compact }: { image: Imag
             ) : null}
           </>
         ) : null}
+        {extra}
       </div>
     </div>
   );
 }
 
-export function ImageDetail({ image, onClose, onSearchSimilar }: { image: ImageView | ImageHitView; onClose: () => void; onSearchSimilar?: (im: ImageView) => void }) {
+export function ImageDetail({ image, onClose, onSearchSimilar, onSimilar }: { image: ImageView | ImageHitView; onClose: () => void; onSearchSimilar?: (im: ImageView) => void; onSimilar?: (im: ImageView) => void }) {
   const hit = isHit(image) ? image : null;
   const Section = ({ label, text }: { label: string; text: string }) => (text ? <div><div className="xs faint mb-8">{label}</div><div className="small pre">{text}</div></div> : null);
   return (
     <Modal wide title={<span className="row gap-8">{hit?.index ? <span className="cite img">图{hit.index}</span> : null}<span className="ellipsis" style={{ maxWidth: 640 }}>{titleOf(image)}</span></span>} onClose={onClose}
-      footer={<>{onSearchSimilar ? <Button onClick={() => { onSearchSimilar(image); onClose(); }}><ScanSearch size={13} />以此图搜相似</Button> : null}<a className="btn" href={image.url} target="_blank" rel="noreferrer">查看原图</a><Button variant="primary" onClick={onClose}>关闭</Button></>}>
+      footer={<>{onSimilar ? <Button onClick={() => { onSimilar(image); onClose(); }}><CopyCheck size={13} />相似 / 查重</Button> : null}{onSearchSimilar ? <Button onClick={() => { onSearchSimilar(image); onClose(); }}><ScanSearch size={13} />以此图搜相似</Button> : null}<a className="btn" href={image.url} target="_blank" rel="noreferrer">查看原图</a><Button variant="primary" onClick={onClose}>关闭</Button></>}>
       <div className="img-detail">
         {isVideoFrame(image) && image.videoUrl ? <FramePlayer image={image} /> : <div className="img-detail-view"><img src={image.url} alt={titleOf(image)} /></div>}
         <div className="col gap-12" style={{ minWidth: 0 }}>

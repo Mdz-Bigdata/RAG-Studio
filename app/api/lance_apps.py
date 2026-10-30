@@ -13,7 +13,7 @@ from prism.recommend import AlreadyVoted
 
 from ..services.agent_service import agent_service
 from ..services.lance_service import lance_service
-from ..services.memory_service import memory_service, public
+from ..services.memory_service import memory_service
 from ..services.recommend_service import recommend_service
 
 lance_router = APIRouter()
@@ -125,6 +125,8 @@ class MemoryCreate(BaseModel):
     agentId: str = "assistant"
     tags: list[str] = Field(default_factory=list)
     ttlDays: float | None = Field(None, gt=0)
+    mediaB64: str | None = None              # 附带的图片 / 短视频（data URL 或裸 base64），需要多模态记忆
+    mediaName: str | None = None             # 原文件名（取扩展名）；data URL 时可省略
 
 
 class MemoryUpdate(BaseModel):
@@ -136,7 +138,8 @@ class MemoryUpdate(BaseModel):
 
 class MemorySearch(BaseModel):
     userId: str = "default"
-    query: str
+    query: str = ""
+    imageB64: str | None = None              # 以图召回（需要多模态记忆）
     agentId: str | None = None
     kinds: list[str] | None = None
     topK: int = Field(5, ge=1, le=50)
@@ -156,19 +159,46 @@ class ForgetRequest(BaseModel):
 
 @memory_router.get("")
 def memory_list(userId: str | None = None, agentId: str | None = None, kind: str | None = None, keyword: str | None = None, limit: int = 200):
-    return [public(r) for r in memory_service.store().list(user_id=userId, agent_id=agentId, kind=kind, keyword=keyword, limit=limit)]
+    return memory_service.publics(memory_service.store().list(user_id=userId, agent_id=agentId, kind=kind, keyword=keyword, limit=limit))
 
 
 @memory_router.post("")
 def memory_add(body: MemoryCreate):
+    media = _decode_media(body.mediaB64, body.mediaName) if body.mediaB64 else None
     rec, how = _call(memory_service.store().add, body.content, user_id=body.userId, agent_id=body.agentId, kind=body.kind, importance=body.importance,
-                     tags=body.tags, ttl_days=body.ttlDays, source="manual")
-    return {**public(rec), "action": how}
+                     tags=body.tags, ttl_days=body.ttlDays, source="manual", media=media)
+    return {**memory_service.publics([rec])[0], "action": how}
+
+
+def _decode_media(data: str, name: str | None) -> tuple[bytes, str]:
+    """data URL / 裸 base64 → (字节, 扩展名)。扩展名取文件名，没有就看 data URL 的 MIME。"""
+    import base64
+    import binascii
+
+    head, _, body = data.partition(",") if data.startswith("data:") else ("", "", data)
+    ext = (name or "").rsplit(".", 1)[-1].lower() if name and "." in name else head[5:].split(";")[0].split("/")[-1].replace("jpeg", "jpg").replace("quicktime", "mov")
+    try:
+        raw = base64.b64decode(body, validate=False)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(400, "媒体文件不是有效的 base64") from exc
+    if len(raw) > 200 * 1024 * 1024:
+        raise HTTPException(413, "媒体文件超过 200MB")
+    return raw, ext or "jpg"
+
+
+@memory_router.get("/{memory_id}/media", include_in_schema=False)
+def memory_media(memory_id: str):
+    from fastapi.responses import FileResponse
+
+    path = memory_service.media_path(memory_id)
+    if path is None:
+        raise HTTPException(404, "这条记忆没有附带媒体")
+    return FileResponse(path, headers={"Cache-Control": "private, max-age=3600"})
 
 
 @memory_router.patch("/{memory_id}")
 def memory_update(memory_id: str, body: MemoryUpdate):
-    return public(_call(memory_service.store().update, memory_id, content=body.content, kind=body.kind, importance=body.importance, tags=body.tags))
+    return memory_service.publics([_call(memory_service.store().update, memory_id, content=body.content, kind=body.kind, importance=body.importance, tags=body.tags)])[0]
 
 
 @memory_router.delete("/{memory_id}")
@@ -180,8 +210,23 @@ def memory_delete(memory_id: str):
 
 @memory_router.post("/search")
 def memory_search(body: MemorySearch):
-    hits = memory_service.store().search(body.query, user_id=body.userId, agent_id=body.agentId, kinds=body.kinds, top_k=body.topK, min_score=body.minScore, touch=False)
-    return [{**public(h["record"]), "score": round(h["score"], 4), "similarity": round(h["similarity"], 4), "recency": round(h["recency"], 4)} for h in hits]
+    image = None
+    if body.imageB64:
+        from prism.multimodal import decode_image_b64
+
+        try:
+            image = decode_image_b64(body.imageB64)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    if not body.query.strip() and image is None:
+        raise HTTPException(400, "需要文字或图片")
+    store = memory_service.store()
+    if image is not None and store.media is None:
+        raise HTTPException(400, "以图召回需要开启多模态记忆（memory.multimodal）并配置跨模态的图文向量模型")
+    hits = store.search(body.query, user_id=body.userId, agent_id=body.agentId, kinds=body.kinds, top_k=body.topK, min_score=body.minScore, touch=False, image=image)
+    views = memory_service.publics([h["record"] for h in hits])
+    return [{**v, "score": round(h["score"], 4), "similarity": round(h["similarity"], 4), "recency": round(h["recency"], 4),
+             "mmSimilarity": round(h["mmSimilarity"], 4) if h.get("mmSimilarity") is not None else None} for v, h in zip(views, hits)]
 
 
 @memory_router.post("/extract")

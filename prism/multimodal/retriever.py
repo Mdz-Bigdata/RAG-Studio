@@ -10,7 +10,12 @@
                     ├─ 相似图片带出  相似图片所在的段落
                     └─ 描述再检索    OCR / VLM 把查询图转成文字 → 正文的向量 + BM25
                     → RRF 融合 → Small-to-Big
-    文搜视频 同文搜图，只在视频关键帧里检索，命中帧按视频 + 时间合并成连续片段（video.group_segments）
+    文搜视频 同文搜图，只在视频关键帧里检索，命中帧按视频 + 时间合并成连续片段（video.group_segments）；
+             图文向量模型能直接编码视频时（WeMM）多两路：文本 → 片段的"纯视频"向量、文本 → "视频 + 字幕"向量
+    图搜视频 image ─┬─ 视觉相似  图像向量 → 关键帧的图片向量（同款商品 / 同一场景）
+                    └─ 图 → 视频  图像向量 → 片段的视频向量（WeMM，跨模态）
+                    → RRF 融合 → 合并成片段
+    查重     图片 / 视频之间的向量相似度（dedup.ContentDeduper）：单条找相似、全库找重复组
     LanceDB 多模态表（multimodal.lance_table，图片与正文同一张表）：文搜图多一路表内图片文字的全文检索（ICU 分词），
                     图搜文多一路正文行上"查询图 CLIP 向量 + 图中文字"的原生混合检索，都参与上面的 RRF
 
@@ -113,8 +118,8 @@ class MultimodalRetriever:
         res.timings_ms["total"] = (time.perf_counter() - t0) * 1000
         return res
 
-    def _text_search(self, res: MultimodalResult, query: str, allowed: set[str] | None, top_k: int | None) -> None:
-        rankings, weights = self._text_routes(query, allowed, res)
+    def _text_search(self, res: MultimodalResult, query: str, allowed: set[str] | None, top_k: int | None, *, video: bool = False) -> None:
+        rankings, weights = self._text_routes(query, allowed, res, video=video)
         pinned = self._label_hits(query, allowed, res) or self._exact_id_hits(query, res)
         # 关键词路几乎匹配不上查询（权重被覆盖率压低）时，它的第一名只是噪声，不能拿来和描述向量路"互相印证"
         if not pinned and weights.get("desc_sparse", 0.0) >= 0.5 * self.cfg.weight_desc_sparse:
@@ -127,9 +132,7 @@ class MultimodalRetriever:
         res.images 是命中的关键帧（各路召回可见），res.segments 是片段（起止时间 + 代表帧时刻）。"""
         t0 = time.perf_counter()
         res = self._result("text2video", query=query)
-        videos = {r.doc_id for r in self.images.records.values() if r.is_video}
-        if doc_ids is not None:
-            videos &= set(doc_ids)
+        videos = self._videos(doc_ids)
         if not videos:
             res.notes.append("知识库里还没有可检索的视频：上传 mp4 / mov / webm / mkv 等视频文件，入库时按镜头抽取关键帧")
             return res
@@ -137,10 +140,49 @@ class MultimodalRetriever:
             return res
         top_k = top_k or self.cfg.top_k
         # 多取一些关键帧：相邻镜头会合并成一段，取少了片段边界不完整
-        self._text_search(res, query, self._allowed(videos), max(top_k * 4, self.cfg.top_n_per_route))
+        self._text_search(res, query, self._allowed(videos), max(top_k * 4, self.cfg.top_n_per_route), video=True)
         res.segments = group_segments(res.images, gap=self.cfg.video.segment_gap_seconds, top_k=top_k)
         res.timings_ms["total"] = (time.perf_counter() - t0) * 1000
         return res
+
+    def _videos(self, doc_ids: list[str] | None) -> set[str]:
+        videos = {r.doc_id for r in self.images.records.values() if r.is_video}
+        return videos & set(doc_ids) if doc_ids is not None else videos
+
+    # --- 图搜视频 -------------------------------------------------------------------------
+    def image_to_video(self, image: Any, *, top_k: int | None = None, doc_ids: list[str] | None = None) -> MultimodalResult:
+        """图片 → 视频片段（拍一张商品照片找商品短视频里出现它的片段）：关键帧视觉相似 + 图片到片段视频向量，RRF 后合并成片段。"""
+        t0 = time.perf_counter()
+        res = self._result("image2video", has_image=True)
+        videos = self._videos(doc_ids)
+        if not videos:
+            res.notes.append("知识库里还没有可检索的视频：上传 mp4 / mov / webm / mkv 等视频文件，入库时按镜头抽取关键帧")
+            return res
+        if not self._ready(res):
+            return res
+        top_k = top_k or self.cfg.top_k
+        n = max(top_k * 4, self.cfg.top_n_per_route)
+        allowed = self._allowed(videos)
+        emb = self.images.embedder
+        vec = emb.embed_image(image)
+        rankings: dict[str, Ranking] = {"visual": self.images.visual.search(vec, n, allowed)}
+        weights = {"visual": self.cfg.weight_clip}
+        if emb.video_native and len(self.images.video) and self.cfg.video.weight_video > 0:
+            rankings["video:image→video"] = self.images.video.search(vec, n, allowed)
+            weights["video:image→video"] = self.cfg.video.weight_video
+        else:
+            res.notes.append("当前图文向量模型不能直接编码视频：图搜视频只比对关键帧（换成 WeMM 后多一路图片 → 整段视频）")
+        self._finish_images(res, rankings, weights, n)
+        res.segments = group_segments(res.images, gap=self.cfg.video.segment_gap_seconds, top_k=top_k)
+        res.timings_ms["total"] = (time.perf_counter() - t0) * 1000
+        return res
+
+    # --- 查重 / 相似 ----------------------------------------------------------------------
+    def deduper(self, threshold: float | None = None):
+        from .dedup import ContentDeduper
+
+        self.images.ensure_fresh()
+        return ContentDeduper(self.images, threshold=self.cfg.dedup_threshold if threshold is None else threshold)
 
     @staticmethod
     def _text_agreement(rankings: dict[str, Ranking], res: MultimodalResult) -> list[str]:
@@ -598,13 +640,25 @@ class MultimodalRetriever:
         sparse_w = self.cfg.weight_desc_sparse * min(1.0, self._sparse_coverage(query) / 0.5) if rankings["desc_sparse"] else self.cfg.weight_desc_sparse
         return rankings, {"desc_dense": dense_w, "desc_sparse": sparse_w}
 
-    def _text_routes(self, query: str, allowed: set[str] | None, res: MultimodalResult) -> tuple[dict[str, Ranking], dict[str, float]]:
+    def _text_routes(self, query: str, allowed: set[str] | None, res: MultimodalResult, *, video: bool = False) -> tuple[dict[str, Ranking], dict[str, float]]:
         rankings: dict[str, Ranking] = {}
         weights: dict[str, float] = {}
         emb = self.images.embedder
+        n = self.cfg.top_n_per_route
         if emb.cross_modal:
-            rankings["clip"] = self.images.visual.search(emb.embed_text(query), self.cfg.top_n_per_route, allowed)
+            rankings["clip"] = self.images.visual.search(emb.embed_text(query), n, allowed)
             weights["clip"] = self.cfg.weight_clip
+        if video and emb.video_native:
+            # 片段整段编码的向量：动作、过程、镜头里发生了什么，单看一张关键帧看不出来
+            vc = self.cfg.video
+            q = emb.embed_query(query, "video") if len(self.images.video) else None
+            for route, store, w in (("video", self.images.video, vc.weight_video), ("video_joint", self.images.video_joint, vc.weight_video_joint)):
+                if q is not None and w > 0 and len(store):
+                    rankings[route] = store.search(q, n, allowed)
+                    weights[route] = w
+            legacy = len({r.doc_id for r in self.images.records.values() if r.is_video and not r.clip})
+            if legacy:
+                res.notes.append(f"{legacy} 个视频是在采样帧功能之前入库的，没有整段视频向量：重新处理这些文档后才参与视频向量两路")
         else:
             res.notes.append("当前图文向量模型没有文本塔（离线感知特征）：文搜图只走图片描述的向量 + BM25 两路；安装 torch + transformers 后自动启用 CLIP 图文向量路")
         d_rank, d_w = self._desc_routes(query, allowed, res)

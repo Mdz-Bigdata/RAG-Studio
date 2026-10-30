@@ -1,5 +1,5 @@
 // 后端 API 客户端。开发态通过 Vite 代理 `/api` → FastAPI（VITE_API_TARGET，默认 http://localhost:8000）；生产态由 FastAPI 静态托管。
-import type { AliasSuggestion, AugmentState, FaqStatus, HealthReport, MetaField, MetaRow, MineruConnectionTest, ChatMessage, ChatPlan, ChatSession, ChatSource, ChunkView, CoverageReport, Document, EntityRelation, EvalExample, EvalReport, ImageHitView, ImageView, KnowledgeBase, MultimodalEvalReport, MineruTiersInfo, ModelConfig, MultimodalMode, MultimodalResponse, MultimodalStatus, ParsingInfo, PopoStatus, EditBackup, PresetsPayload, ProviderPreset, RetrievalMode, RetrievalOverrides, RetrievalResponse, RouteResult, RuntimeInfo, SettingsPayload, SystemStatus, WeavedRelation, ReindexStatus, UserIdentity, VectorBenchmark, KbGraph } from './types';
+import type { AliasSuggestion, AugmentState, FaqStatus, HealthReport, MetaField, MetaRow, MineruConnectionTest, ChatMessage, ChatPlan, ChatSession, ChatSource, ChunkView, CoverageReport, Document, EntityRelation, EvalExample, EvalReport, ImageHitView, ImageView, KnowledgeBase, MultimodalEvalReport, MineruTiersInfo, ModelConfig, MultimodalMode, MultimodalResponse, MultimodalStatus, SimilarResponse, DuplicatesResponse, ParsingInfo, PopoStatus, EditBackup, PresetsPayload, ProviderPreset, RetrievalMode, RetrievalOverrides, RetrievalResponse, RouteResult, RuntimeInfo, SettingsPayload, SystemStatus, WeavedRelation, ReindexStatus, UserIdentity, VectorBenchmark, KbGraph } from './types';
 import type { HardNegativeMiningConfig, HardNegativeReport, MetadataFacets } from './types';
 
 export const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? '/api/v1';
@@ -94,6 +94,21 @@ export const api = {
     images: (kbId: string, docId?: string) => request<ImageView[]>(`/multimodal/${kbId}/images${docId ? `?docId=${encodeURIComponent(docId)}` : ''}`),
     search: (kbId: string, body: { mode: MultimodalMode; query?: string; imageB64?: string | null; topK?: number; alpha?: number; minScore?: number | null; docIds?: string[] }) =>
       request<MultimodalResponse>(`/multimodal/${kbId}/search`, json(body)),
+    // imageId：图片 / 视频关键帧的相似图片（关键帧还带相似视频）；docId：视频的相似视频（含片段重合度）
+    similar: (kbId: string, params: { imageId?: string; docId?: string; topK?: number; threshold?: number | null }) => {
+      const q = new URLSearchParams();
+      if (params.imageId) q.set('imageId', params.imageId);
+      if (params.docId) q.set('docId', params.docId);
+      if (params.topK) q.set('topK', String(params.topK));
+      if (params.threshold !== null && params.threshold !== undefined) q.set('threshold', String(params.threshold));
+      return request<SimilarResponse>(`/multimodal/${kbId}/similar?${q}`);
+    },
+    duplicates: (kbId: string, params: { threshold?: number | null; kinds?: ('image' | 'video')[] }) => {
+      const q = new URLSearchParams();
+      if (params.threshold !== null && params.threshold !== undefined) q.set('threshold', String(params.threshold));
+      if (params.kinds?.length) q.set('kinds', params.kinds.join(','));
+      return request<DuplicatesResponse>(`/multimodal/${kbId}/duplicates${q.toString() ? `?${q}` : ''}`);
+    },
   },
   chat: {
     sessions: (kbId?: string | null) => request<ChatSession[]>(`/chat/sessions${kbId ? `?kbId=${encodeURIComponent(kbId)}` : ''}`),

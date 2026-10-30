@@ -1,6 +1,6 @@
-// 文搜视频结果：按视频分组，每个视频一个播放器 + 时间轴（命中片段高亮）；点片段从起点播放、到终点自动暂停。
+// 文搜视频 / 图搜视频结果：按视频分组，每个视频一个播放器 + 时间轴（命中片段高亮）；点片段从起点播放、到终点自动暂停。
 import { useMemo, useRef, useState } from 'react';
-import { Film, Maximize2, Play } from 'lucide-react';
+import { CopyCheck, Film, Maximize2, Play } from 'lucide-react';
 import type { ImageHitView, VideoSegmentView } from '../api/types';
 import { Badge, Callout, ScoreBar } from './ui';
 import { IMAGE_ROUTE } from './image-card';
@@ -73,24 +73,33 @@ export function Timeline({ spans, duration, now, active, onPick, onSeek }: { spa
 const frameOf = (s: VideoSegmentView) => s.frames.find((f) => f.time === s.time) ?? s.frames[0];
 const briefOf = (f?: ImageHitView) => (f ? f.description || f.ocrText || f.contextText || f.caption : '') || '（这一帧没有描述文字：靠图文向量命中）';
 
-export function VideoResults({ segments, onOpenFrame }: { segments: VideoSegmentView[]; onOpenFrame: (f: ImageHitView) => void }) {
+interface VideoActions {
+  onOpenFrame: (f: ImageHitView) => void;
+  onSimilarFrame?: (f: ImageHitView) => void;   // 某个镜头关键帧的相似图片 / 片段
+  onSimilarVideo?: (docId: string) => void;     // 整个视频的相似视频
+}
+
+export function VideoResults({ segments, ...actions }: { segments: VideoSegmentView[] } & VideoActions) {
   // 按视频分组；组的顺序 = 组内最好片段的名次（segments 已按分数排好）
   const groups = useMemo(() => {
     const m = new Map<string, VideoSegmentView[]>();
     for (const s of segments) m.set(s.docId, [...(m.get(s.docId) ?? []), s]);
     return [...m.values()];
   }, [segments]);
-  return <div className="col gap-12">{groups.map((g) => <VideoGroup key={g[0].docId} segments={g} onOpenFrame={onOpenFrame} />)}</div>;
+  return <div className="col gap-12">{groups.map((g) => <VideoGroup key={g[0].docId} segments={g} {...actions} />)}</div>;
 }
 
-function VideoGroup({ segments, onOpenFrame }: { segments: VideoSegmentView[]; onOpenFrame: (f: ImageHitView) => void }) {
+function VideoGroup({ segments, onOpenFrame, onSimilarFrame, onSimilarVideo }: { segments: VideoSegmentView[] } & VideoActions) {
   const top = segments[0];
   const p = useSegmentPlayback(segments, top.duration);
   return (
     <div className="card pad col gap-12">
       <div className="row between wrap gap-8">
         <div className="card-title" style={{ marginBottom: 0, minWidth: 0 }}><Film size={14} /><span className="ellipsis">{top.fileName ?? top.docId}</span></div>
-        <span className="xs faint">{segments.length} 个相关片段{top.duration ? ` · 时长 ${formatTs(top.duration)}` : ''}</span>
+        <div className="row gap-8">
+          <span className="xs faint">{segments.length} 个相关片段{top.duration ? ` · 时长 ${formatTs(top.duration)}` : ''}</span>
+          {onSimilarVideo ? <button type="button" className="btn xs" title="找出与这个视频相似 / 重复的视频" onClick={() => onSimilarVideo(top.docId)}><CopyCheck size={10} />相似 / 查重</button> : null}
+        </div>
       </div>
       <div className="video-layout">
         <div className="col gap-8" style={{ minWidth: 0 }}>
@@ -117,6 +126,7 @@ function VideoGroup({ segments, onOpenFrame }: { segments: VideoSegmentView[]; o
                     {s.frames.length > 1 ? <Badge>{s.frames.length} 个镜头</Badge> : null}
                     {f ? Object.entries(f.routes).slice(0, 3).map(([k, v]) => <Badge key={k} mono tone={IMAGE_ROUTE[k]?.tone ?? ''} title={`${IMAGE_ROUTE[k]?.label ?? k}：第 ${v.rank} 名`}>{IMAGE_ROUTE[k]?.label ?? k} #{v.rank}</Badge>) : null}
                     {f ? <button type="button" className="btn xs" style={{ marginLeft: 'auto' }} onClick={(e) => { e.stopPropagation(); onOpenFrame(f); }}><Maximize2 size={10} />关键帧</button> : null}
+                    {f && onSimilarFrame ? <button type="button" className="btn icon xs" title="这个镜头的相似 / 查重" aria-label="这个镜头的相似 / 查重" onClick={(e) => { e.stopPropagation(); onSimilarFrame(f); }}><CopyCheck size={10} /></button> : null}
                   </div>
                 </div>
               </div>

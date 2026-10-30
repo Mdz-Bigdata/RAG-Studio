@@ -1,4 +1,4 @@
-"""多模态检索 API：文搜图 / 图搜图 / 图文混合 / 图搜文 / 文搜视频，图片库、图片文件与视频文件。端到端问答走 /chat/stream。"""
+"""多模态检索 API：文搜图 / 图搜图 / 图文混合 / 图搜文 / 文搜视频 / 图搜视频，查重与相似推荐，图片库、图片文件与视频文件。端到端问答走 /chat/stream。"""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ def status(kb_id: str):
 
 @router.post("/{kb_id}/search")
 def search(kb_id: str, body: MultimodalSearchRequest):
-    """mode = text2image（文搜图）| image2image（图搜图）| hybrid（图文混合）| image2text（图搜文）| text2video（文搜视频）。"""
+    """mode = text2image（文搜图）| image2image（图搜图）| hybrid（图文混合）| image2text（图搜文）| text2video（文搜视频）| image2video（图搜视频）。"""
     _require_kb(kb_id)
     try:
         return multimodal_service.search(kb_id, body.mode, query=body.query or "", image_b64=body.imageB64, top_k=body.topK, alpha=body.alpha, min_score=body.minScore, doc_ids=body.docIds)
@@ -42,6 +42,25 @@ def search(kb_id: str, body: MultimodalSearchRequest):
         raise HTTPException(400, str(exc)) from exc
     except Exception as exc:
         raise HTTPException(500, f"多模态检索失败：{exc}") from exc
+
+
+@router.get("/{kb_id}/similar")
+def similar(kb_id: str, imageId: str | None = None, docId: str | None = None, topK: int = 10, threshold: float | None = None):
+    """相似内容推荐 / 单条查重：imageId（图片或视频片段）找相似图片与片段，docId（视频）找相似视频（含片段重合度）。"""
+    _require_kb(kb_id)
+    if not imageId and not docId:
+        raise HTTPException(400, "需要 imageId 或 docId")
+    try:
+        return multimodal_service.similar(kb_id, image_id=imageId, doc_id=docId, top_k=max(1, min(topK, 50)), threshold=threshold)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.get("/{kb_id}/duplicates")
+def duplicates(kb_id: str, threshold: float | None = None, kinds: str | None = None):
+    """全库内容查重：kinds = image,video（默认都查）；threshold 不给时按图文向量模型自动。"""
+    _require_kb(kb_id)
+    return multimodal_service.duplicates(kb_id, threshold=threshold, kinds=[k for k in (kinds or "").split(",") if k in ("image", "video")] or None)
 
 
 @router.get("/{kb_id}/images")

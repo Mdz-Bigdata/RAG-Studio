@@ -173,8 +173,14 @@ multimodal:
   embedding:
     provider: auto            # auto：已装 torch + transformers → clip；否则 perceptual（离线感知特征：只支持图搜图，文搜图走描述文本）
                               # clip | api（Jina 兼容多模态 /embeddings）| perceptual；模型配置中心激活的"图文向量"优先
-    model: OFA-Sys/chinese-clip-vit-base-patch16   # 中文用 Chinese-CLIP；原版 CLIP（openai/clip-vit-base-patch32）中文查询效果差
+                              # wemm：腾讯 WeMM-Embedding 本地推理（文本 / 图片 / 视频 / 视频 + 字幕同一空间，需要 transformers≥5.2，
+                              #       无 GPU 很慢）；wemm_api：GPU 机器上 `vllm serve tencent/WeMM-Embedding-2B --runner pooling`，base_url 填它的 /v1
+    model: OFA-Sys/chinese-clip-vit-base-patch16   # 中文用 Chinese-CLIP；原版 CLIP（openai/clip-vit-base-patch32）中文查询效果差；WeMM：tencent/WeMM-Embedding-2B / 4B / 9B
     batch_size: 16
+    # WeMM 专用（其他模型忽略）
+    # dim: 1024               # Matryoshka 降维；不写 = 全长（2B 2048 维），256 维约保留 98.7% 效果
+    # video_max_frames: 16    # 每个视频片段送入模型的帧数上限
+    # dual_pass: true         # 一次前向同时得到"纯视频"和"视频 + 字幕"两个向量；false = 分两次前向
   min_image_side: 48          # 图标 / 分隔线不入库
   max_side: 1280              # 入库图片最长边
   drop_repeated_pages: 3      # 同一张图出现在 ≥3 页 → logo / 水印，丢弃
@@ -190,6 +196,7 @@ multimodal:
   weight_lance_mm: 1.0        # 多模态表路的 RRF 权重；0 = 只同步表、不参与检索
   hybrid_alpha: 0.5           # 图文混合的文本权重：score = α·z(text·I) + (1-α)·z(image·I)
   min_score: null             # 图搜图相似度阈值，例如 0.7
+  dedup_threshold: null       # 内容查重：图片 / 视频片段余弦 ≥ 它算重复；null = 按模型自动（CLIP 0.95 / WeMM 见 wemm.py / 离线感知特征 0.97）
   neighbor_min_score: null    # 图搜文：相似图片达到该相似度时，其所在段落进入候选；null = 按模型自动（CLIP 0.9 / 离线感知特征 0.7）
   chat_images: 4              # 一轮回答最多携带的图片
   chat_attach_images: 2       # 以像素形式交给 VLM 的图片数（其余只给描述文本）
@@ -204,6 +211,9 @@ multimodal:
     max_segment_seconds: 10   # 片段最长秒数（画面没变的相邻片段会再合并）
     max_frames: 200           # 每个视频最多关键帧数（每帧都会做 OCR / VLM 描述）
     segment_gap_seconds: 2    # 文搜视频：同一镜头里间隔不超过它的命中片段连成一段（跨镜头不连）
+    clip_frames: 16           # 每个片段另存的采样帧（小图）：能直接编码视频的模型（WeMM）用它整段编码，换模型时直接重算
+    weight_video: 1.0         # 文搜视频：文本 → 整段视频向量路（WeMM）
+    weight_video_joint: 1.0   # 文搜视频：文本 → 视频 + 字幕向量路（WeMM；没有字幕的片段即纯视频向量）
 
 # ---------------------------------------------------------------- 生成
 generation:
@@ -242,6 +252,7 @@ memory:                       # 长期记忆：按用户记住身份 / 偏好 / 
   extract: llm                # 回答后在后台抽取记忆：llm（辅助模型）| rule | off
   dedup_threshold: 0.9        # 与已有记忆余弦相似度 ≥ 该值 → 合并更新，不重复写入
   half_life_days: 30
+  multimodal: false           # 多模态记忆：记忆可附带图片 / 短视频，用图文向量模型（推荐 WeMM）另存一份向量，文字能召回图片记忆、图片也能当查询
 
 recommend:                    # 个性化推荐：兴趣向量 = 交互条目向量的时间衰减加权和（+ 记忆偏好）
   enabled: true               # 问答里的提问、被引用的章节自动记为交互

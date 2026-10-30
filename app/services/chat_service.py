@@ -138,7 +138,13 @@ class ChatService:
         plan["imageSearch"] = image_search or None
         # 长期记忆（LanceDB）：按用户召回，只用于个性化；随 plan 下发给前端并存进本轮链路
         user_id = str((user or {}).get("userId") or "default")
-        memories = memory_service.recall(user_id, message) if message else []
+        recall_image = None
+        if image_b64 and settings.memory.multimodal:
+            try:
+                recall_image = decode_image_b64(image_b64)
+            except ValueError:
+                pass
+        memories = memory_service.recall(user_id, message, image=recall_image) if (message or recall_image is not None) else []
         plan["memories"] = memories
         # Agent 湖检索增强：相似的历史问答作为参考信息（本轮检索到资料时才带，不作为引用来源）
         experience_notes, experience = lake_service.experience(message, kb_id=resolved_kb, session_id=session_id) if result.contexts else ("", [])

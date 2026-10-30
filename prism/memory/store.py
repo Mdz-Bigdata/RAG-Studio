@@ -5,6 +5,8 @@
 - 召回：SQL 预过滤（用户、智能体、类型、未过期）→ 向量近邻 → score = w_sim·相似度 + w_rec·新近度 + w_imp·重要度；
 - 遗忘：过期删除；长期没被用到、重要度又低的记忆按衰减分清理；
 - 每次写入都是 LanceDB 的一个新版本：记忆的增删改可回看。
+- 多模态（传入跨模态的图文向量模型时，见 media.py）：记忆可以附带图片 / 短视频，另存一份图文空间的向量，
+  文字能召回图片 / 视频记忆，图片也能当查询；
 向量模型换了（维度 / 模型名变化）时自动用保存的原文重算向量。
 """
 
@@ -23,6 +25,7 @@ import numpy as np
 from ..config import MemoryConfig
 from ..index.embeddings import BaseEmbedder
 from ..lance import connect, open_table, sql_in, sql_str, table_info, version_list, write_lock
+from .media import MemoryMediaIndex
 
 logger = logging.getLogger(__name__)
 
@@ -84,13 +87,17 @@ def _row_to_record(row: dict[str, Any]) -> MemoryRecord:
 
 
 class LanceMemoryStore:
-    def __init__(self, directory: str | Path, embedder: BaseEmbedder, cfg: MemoryConfig | None = None) -> None:
+    def __init__(self, directory: str | Path, embedder: BaseEmbedder, cfg: MemoryConfig | None = None, *, mm_embedder: Any = None) -> None:
         self.directory = Path(directory)
         self.embedder = embedder
         self.cfg = cfg or MemoryConfig()
         self._meta_path = self.directory / f"{TABLE}.meta.json"
         self._tbl = None
         self._check_embedder()
+        self.media: MemoryMediaIndex | None = None
+        if mm_embedder is not None and getattr(mm_embedder, "cross_modal", False):
+            self.media = MemoryMediaIndex(self.directory, mm_embedder)
+            self.media.check(self.list(limit=1_000_000))
 
     # ----------------------------------------------------------------------------------
     @property
@@ -140,8 +147,21 @@ class LanceMemoryStore:
 
     # ----------------------------------------------------------------------------------
     def add(self, content: str, *, user_id: str = "default", agent_id: str = "assistant", kind: str = "fact", importance: float = 0.5,
-            source: str = "manual", session_id: str = "", tags: list[str] | None = None, ttl_days: float | None = None) -> tuple[MemoryRecord, str]:
-        """写入一条记忆；与已有记忆近似重复时合并更新。返回 (记录, "created" | "updated")。"""
+            source: str = "manual", session_id: str = "", tags: list[str] | None = None, ttl_days: float | None = None,
+            media: tuple[bytes, str] | None = None) -> tuple[MemoryRecord, str]:
+        """写入一条记忆；与已有记忆近似重复时合并更新。返回 (记录, "created" | "updated")。
+        media = (文件字节, 扩展名)：附带的图片 / 短视频，需要多模态记忆（self.media）。"""
+        if media is not None and self.media is None:
+            raise ValueError("附带图片 / 视频需要开启多模态记忆（memory.multimodal）并配置跨模态的图文向量模型")
+        # 带媒体的记忆不按文字去重合并："这是我的车"配两张不同的照片是两条记忆
+        rec, how = self._add(content, user_id=user_id, agent_id=agent_id, kind=kind, importance=importance, source=source, session_id=session_id, tags=tags,
+                             ttl_days=ttl_days, dedup=media is None)
+        if self.media is not None:
+            self.media.upsert(rec, media=media)
+        return rec, how
+
+    def _add(self, content: str, *, user_id: str, agent_id: str, kind: str, importance: float, source: str, session_id: str, tags: list[str] | None,
+             ttl_days: float | None, dedup: bool = True) -> tuple[MemoryRecord, str]:
         content = " ".join(content.split()).strip()
         if not content:
             raise ValueError("记忆内容为空")
@@ -151,7 +171,7 @@ class LanceMemoryStore:
         vec = self.embedder.embed_documents([content])[0]
         tbl = self._table(create=True)
         with write_lock(self.directory, TABLE):
-            dup = self._nearest(vec, user_id=user_id, agent_id=agent_id)
+            dup = self._nearest(vec, user_id=user_id, agent_id=agent_id) if dedup else None
             if dup is not None and dup[1] >= self.cfg.dedup_threshold:
                 old = dup[0]
                 rec = MemoryRecord(**{**old.to_dict(), "content": content, "importance": max(old.importance, importance), "updated_at": now,
@@ -176,10 +196,11 @@ class LanceMemoryStore:
         return _row_to_record(t[0]), 1.0 - float(t[0]["_distance"])
 
     def search(self, query: str, *, user_id: str = "default", agent_id: str | None = None, kinds: list[str] | None = None,
-               top_k: int | None = None, min_score: float | None = None, touch: bool = True) -> list[dict[str, Any]]:
-        """召回：返回 [{record, score, similarity, recency, importance}]，按综合分降序。"""
+               top_k: int | None = None, min_score: float | None = None, touch: bool = True, image: Any = None) -> list[dict[str, Any]]:
+        """召回：返回 [{record, score, similarity, recency, importance}]，按综合分降序。
+        多模态记忆打开时另走一路图文空间检索（image 可以当查询），相似度取两路较大者。"""
         tbl = self._table()
-        if tbl is None or not query.strip():
+        if tbl is None or (not query.strip() and image is None):
             return []
         top_k = top_k or self.cfg.recall_top_k
         min_score = self.cfg.min_score if min_score is None else min_score
@@ -189,16 +210,26 @@ class LanceMemoryStore:
             where.append(f"agent_id = {sql_str(agent_id)}")
         if kinds:
             where.append(sql_in("kind", kinds))
-        vec = self.embedder.embed_queries([query])[0]
-        rows = (tbl.search(np.asarray(vec, dtype=np.float32)).distance_type("cosine").where(" AND ".join(where), prefilter=True)
-                .select(_COLUMNS + ["_distance"]).limit(max(top_k * 4, 20)).to_list())
+        limit = max(top_k * 4, 20)
+        sims: dict[str, float] = {}
+        recs: dict[str, MemoryRecord] = {}
+        if query.strip():
+            vec = self.embedder.embed_queries([query])[0]
+            for r in (tbl.search(np.asarray(vec, dtype=np.float32)).distance_type("cosine").where(" AND ".join(where), prefilter=True)
+                      .select(_COLUMNS + ["_distance"]).limit(limit).to_list()):
+                recs[r["id"]] = _row_to_record(r)
+                sims[r["id"]] = 1.0 - float(r["_distance"])
+        mm = self.media.search(query=query, image=image, user_id=user_id, agent_id=agent_id, limit=limit) if self.media is not None else {}
+        missing = [i for i in mm if i not in recs]
+        if missing:
+            for r in tbl.search().where(" AND ".join(where + [sql_in("id", missing)])).select(_COLUMNS).limit(len(missing)).to_list():
+                recs[r["id"]] = _row_to_record(r)
         hits = []
-        for r in rows:
-            rec = _row_to_record(r)
-            sim = 1.0 - float(r["_distance"])
+        for mid, rec in recs.items():
+            sim = max(sims.get(mid, -1.0), mm.get(mid, -1.0))
             recency = 0.5 ** (max(0.0, now - max(rec.updated_at, rec.last_access)) / (self.cfg.half_life_days * _DAY))
             score = self.cfg.w_similarity * sim + self.cfg.w_recency * recency + self.cfg.w_importance * rec.importance
-            hits.append({"record": rec, "score": score, "similarity": sim, "recency": recency, "importance": rec.importance})
+            hits.append({"record": rec, "score": score, "similarity": sim, "recency": recency, "importance": rec.importance, "mmSimilarity": mm.get(mid)})
         hits.sort(key=lambda h: h["score"], reverse=True)
         hits = [h for h in hits if h["score"] >= min_score][:top_k]
         if touch and hits:
@@ -264,6 +295,8 @@ class LanceMemoryStore:
         vec = self.embedder.embed_documents([rec.content])
         with write_lock(self.directory, TABLE):
             self._table().merge_insert("id").when_matched_update_all().when_not_matched_insert_all().execute(self._to_arrow([rec], vec))
+        if self.media is not None:
+            self.media.upsert(rec)
         return rec
 
     def delete(self, memory_id: str) -> bool:
@@ -271,14 +304,23 @@ class LanceMemoryStore:
         if tbl is None:
             return False
         with write_lock(self.directory, TABLE):
-            return tbl.delete(f"id = {sql_str(memory_id)}").num_deleted_rows > 0
+            ok = tbl.delete(f"id = {sql_str(memory_id)}").num_deleted_rows > 0
+        if self.media is not None:
+            self.media.remove([memory_id])
+        return ok
 
     def clear(self, user_id: str) -> int:
         tbl = self._table()
         if tbl is None:
             return 0
         with write_lock(self.directory, TABLE):
-            return tbl.delete(f"user_id = {sql_str(user_id)}").num_deleted_rows
+            n = tbl.delete(f"user_id = {sql_str(user_id)}").num_deleted_rows
+        self._prune_media()
+        return n
+
+    def _prune_media(self) -> None:
+        if self.media is not None:
+            self.media.prune({r.id for r in self.list(limit=1_000_000)})
 
     def forget(self, *, user_id: str | None = None, min_keep_score: float = 0.15) -> dict[str, int]:
         """清理：过期的直接删；其余按"重要度 × 新近度"衰减分，低于 min_keep_score 的删掉（用户明确要求记住的不受影响：重要度高）。"""
@@ -292,6 +334,7 @@ class LanceMemoryStore:
             stale = [r for r in self.list(user_id=user_id, limit=100_000)
                      if r.importance * 0.5 ** ((now - max(r.updated_at, r.last_access)) / (self.cfg.half_life_days * _DAY)) < min_keep_score]
             decayed = tbl.delete(sql_in("id", [r.id for r in stale])).num_deleted_rows if stale else 0
+        self._prune_media()
         return {"expired": expired, "decayed": decayed}
 
     # ----------------------------------------------------------------------------------
@@ -307,7 +350,8 @@ class LanceMemoryStore:
             by_kind[r["kind"]] = by_kind.get(r["kind"], 0) + 1
             by_user[r["user_id"]] = by_user.get(r["user_id"], 0) + 1
             by_agent[r["agent_id"]] = by_agent.get(r["agent_id"], 0) + 1
-        return {"rows": len(rows), "users": len(by_user), "byKind": by_kind, "byUser": by_user, "byAgent": by_agent, "table": table_info(tbl), **self._signature()}
+        mm = {"multimodal": {**self.media.count(), **self.media._signature()}} if self.media is not None else {}
+        return {"rows": len(rows), "users": len(by_user), "byKind": by_kind, "byUser": by_user, "byAgent": by_agent, "table": table_info(tbl), **self._signature(), **mm}
 
     def versions(self, limit: int = 30) -> list[dict[str, Any]]:
         tbl = self._table()

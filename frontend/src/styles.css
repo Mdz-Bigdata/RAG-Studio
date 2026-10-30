@@ -680,6 +680,9 @@ textarea.mono { font-family: var(--font-mono); font-size: 12.5px; }
 
 /* ---- 视频检索：关键帧时间标签、片段播放器、时间轴 */
 .img-ts { position: absolute; left: 6px; bottom: 6px; display: inline-flex; align-items: center; gap: 3px; padding: 0 5px; line-height: 17px; border-radius: 5px; font-family: var(--font-mono); font-size: 10.5px; color: #fff; background: rgba(0, 0, 0, 0.62); }
+.img-act { position: absolute; top: 6px; right: 6px; opacity: 0; background: var(--bg-2); transition: opacity var(--transition); }
+.img-card:hover .img-act, .img-act:focus-visible { opacity: 1; }
+@media (hover: none) { .img-act { opacity: 1; } }   /* 触屏没有悬停：常显 */
 .video-view { width: 100%; max-height: 62vh; aspect-ratio: 16 / 9; background: #000; border-radius: 10px; display: block; }
 .video-layout { display: grid; gap: 14px; grid-template-columns: minmax(0, 1.45fr) minmax(250px, 1fr); align-items: start; }
 .video-segs { max-height: 460px; overflow-y: auto; padding-right: 2px; }

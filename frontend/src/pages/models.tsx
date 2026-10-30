@@ -11,7 +11,7 @@ const CATS: { key: ModelCategory; label: string; short: string; icon: React.Reac
   { key: 'embedding', label: '文本嵌入（Embedding）模型', short: '嵌入', icon: <Layers size={14} />, desc: '把文本映射成向量，支撑语义检索。更换后自动重建各知识库索引', fallback: '哈希向量（只反映词面重叠）' },
   { key: 'rerank', label: '重排模型', short: '重排', icon: <Shuffle size={14} />, desc: 'Cross-Encoder 精排，单次改动提升最大的一层', fallback: 'LLM 打分 → 词法精排' },
   { key: 'multimodal', label: '多模态模型', short: '多模态', icon: <Zap size={14} />, desc: '看图的模型（VLM）：入库时给图片生成描述，问答时直接看用户图片与检索到的图片', fallback: '使用文本模型（不发送图片像素，只给 OCR / 描述文本）' },
-  { key: 'image_embedding', label: '图文向量模型', short: '图文', icon: <Images size={14} />, desc: 'CLIP 类双塔模型：图片与文字映射到同一向量空间，支撑文搜图 / 图搜图 / 图搜文。更换后图片向量自动重算', fallback: '离线感知特征（只支持图搜图；文搜图走图片描述文本）' },
+  { key: 'image_embedding', label: '图文向量模型', short: '图文', icon: <Images size={14} />, desc: 'CLIP 类双塔模型或 WeMM 全模态模型：图片 / 视频与文字映射到同一向量空间，支撑文搜图 / 图搜图 / 图搜文 / 文搜视频 / 查重。更换后图片与视频向量自动重算', fallback: '离线感知特征（只支持图搜图；文搜图走图片描述文本）' },
 ];
 const TYPE_LABEL: Record<string, string> = { anthropic: 'Anthropic SDK', openai_compatible: 'OpenAI 兼容', local: '本地模型', api: 'API' };
 
@@ -137,7 +137,7 @@ const ACTIVATE_NOTE: Record<ModelCategory, string> = {
   embedding: '正在后台自动重建索引',
   rerank: '立即生效',
   multimodal: '立即生效',
-  image_embedding: '图片向量将在后台自动重算',
+  image_embedding: '图片与视频向量将在后台自动重算',
 };
 const NOUN: Record<ModelCategory, string> = { text: '文本模型', embedding: '嵌入模型', rerank: '重排模型', multimodal: '多模态模型', image_embedding: '图文向量模型' };
 const sameUrl = (a?: string | null, b?: string | null) => (a ?? '').trim().replace(/\/+$/, '') === (b ?? '').trim().replace(/\/+$/, '');
@@ -264,7 +264,7 @@ function ModelConfigurator({ category, providers, configs, current, onDone }: { 
         </select>
       </Field>
       {isLocal ? (
-        <div className="xs faint">{category === 'image_embedding' ? <>本地 CLIP 通过 transformers 加载（<code>pip install torch transformers</code>），首次使用会下载权重。</> : <>本地模型通过 sentence-transformers 加载（<code>pip install sentence-transformers</code>），首次使用会下载权重。</>}</div>
+        <div className="xs faint">{category === 'image_embedding' ? <>本地 CLIP 通过 transformers 加载（<code>pip install torch transformers</code>），首次使用会下载权重。WeMM-Embedding 需要 transformers ≥ 5.2，没有 GPU 时编码很慢，建议用 vLLM 部署后按 API 接入。</> : <>本地模型通过 sentence-transformers 加载（<code>pip install sentence-transformers</code>），首次使用会下载权重。</>}</div>
       ) : (
         <>
           <Field label="Base URL" hint={provider?.type === 'anthropic' ? '留空使用官方地址' : 'OpenAI 兼容端点，通常以 /v1 结尾'}><input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://…/v1" /></Field>

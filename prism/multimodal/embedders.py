@@ -3,6 +3,7 @@
 - CLIPEmbedder：HuggingFace transformers 的 CLIP / Chinese-CLIP 双塔模型（文本塔 + 图像塔，对比学习对齐）。
   原版 CLIP 以英文训练，中文查询请用 Chinese-CLIP（默认 OFA-Sys/chinese-clip-vit-base-patch16）。
 - APIImageEmbedder：Jina 兼容的多模态 /embeddings 端点（jina-clip-v2 等），input 为 [{"text": ..}, {"image": <base64>}]。
+- WeMMEmbedder / WeMMAPIEmbedder（wemm.py）：腾讯 WeMM-Embedding，文本 / 图片 / 视频同一空间，视频片段可以整段编码。
 - PerceptualImageEmbedder：离线兜底。颜色直方图 + 灰度缩略图 + 梯度方向直方图，只反映"看起来像不像"，
   能做图搜图 / 去重；没有文本塔（cross_modal=False），文搜图此时只走"描述文本"两路。
 
@@ -42,7 +43,9 @@ class BaseImageEmbedder(ABC):
     model_name: str | None = None
     dim: int = 0
     cross_modal: bool = False            # True：有文本塔，文本向量可直接与图片向量比较
+    video_native: bool = False           # True：能把一段视频（多帧 + 字幕）整体编码（embed_videos），与文本 / 图片同一空间
     similar_threshold: float = 0.9       # 图-图余弦达到多少才算"相似"。CLIP 类模型无关图片也有 0.7~0.85
+    dedup_threshold: float = 0.95        # 图-图余弦达到多少算"同一张图"（翻拍 / 转码 / 裁边）
 
     @abstractmethod
     def embed_images(self, images: list[Any]) -> np.ndarray:
@@ -57,6 +60,10 @@ class BaseImageEmbedder(ABC):
     def embed_text(self, text: str) -> np.ndarray:
         return self.embed_texts([text])[0]
 
+    def embed_query(self, text: str, target: str = "image") -> np.ndarray:
+        """检索用的文本查询向量。target 是要找的模态（image / video / text）：WeMM 按它加检索指令，双塔模型不区分。"""
+        return self.embed_text(text)
+
     def signature(self) -> dict[str, Any]:
         return {"embedder": self.name, "model": self.model_name, "dim": self.dim, "cross_modal": self.cross_modal}
 
@@ -68,6 +75,7 @@ class PerceptualImageEmbedder(BaseImageEmbedder):
     model_name = "perceptual-v1"
     cross_modal = False
     similar_threshold = 0.7
+    dedup_threshold = 0.97
     _W_THUMB, _W_COLOR, _W_EDGE = 0.5, 0.3, 0.2
 
     def __init__(self) -> None:
@@ -230,16 +238,40 @@ def clip_available() -> bool:
     return importlib.util.find_spec("torch") is not None and importlib.util.find_spec("transformers") is not None
 
 
+def is_wemm(model: str | None) -> bool:
+    return "wemm" in (model or "").lower()
+
+
+WEMM_DEFAULT_MODEL = "tencent/WeMM-Embedding-2B"
+
+
+def build_wemm(cfg: ImageEmbeddingConfig, *, model: str | None = None, base_url: str | None = None, api_key: str | None = None, remote: bool | None = None) -> BaseImageEmbedder:
+    from .wemm import WeMMAPIEmbedder, WeMMEmbedder
+
+    name = model or cfg.model
+    name = name if is_wemm(name) else WEMM_DEFAULT_MODEL
+    remote = (cfg.provider == "wemm_api") if remote is None else remote
+    if remote:
+        return WeMMAPIEmbedder(name, base_url=base_url or cfg.base_url or "", api_key=api_key or cfg.api_key or os.environ.get(cfg.api_key_env), dim=cfg.dim,
+                               instructions=cfg.instructions, video_max_frames=cfg.video_max_frames)
+    return WeMMEmbedder(name, device=cfg.device, batch_size=max(1, min(cfg.batch_size, 8)), dim=cfg.dim, instructions=cfg.instructions,
+                        image_max_pixels=cfg.image_max_pixels, image_min_pixels=cfg.image_min_pixels, video_max_pixels=cfg.video_max_pixels, video_max_frames=cfg.video_max_frames, dual_pass=cfg.dual_pass)
+
+
 def build_image_embedder(cfg: ImageEmbeddingConfig) -> BaseImageEmbedder:
     """auto：能加载 CLIP 就用 CLIP，否则回退离线感知特征（并记录原因）。"""
     if cfg.provider == "perceptual":
         return PerceptualImageEmbedder()
+    if cfg.provider in ("wemm", "wemm_api") or (cfg.provider in ("clip", "api") and is_wemm(cfg.model)):
+        return build_wemm(cfg, remote=cfg.provider in ("wemm_api", "api"))
     if cfg.provider == "api":
         return APIImageEmbedder(cfg.model, base_url=cfg.base_url or "", api_key=cfg.api_key or os.environ.get(cfg.api_key_env), batch_size=min(cfg.batch_size, 8))
     if cfg.provider == "clip":
         return CLIPEmbedder(cfg.model, device=cfg.device, batch_size=cfg.batch_size, max_text_tokens=cfg.max_text_tokens)
     if clip_available():
         try:
+            if is_wemm(cfg.model):
+                return build_wemm(cfg, remote=False)
             return CLIPEmbedder(cfg.model, device=cfg.device, batch_size=cfg.batch_size, max_text_tokens=cfg.max_text_tokens)
         except Exception as exc:
             logger.warning("图文向量模型 %s 加载失败（%s），回退离线感知特征", cfg.model, exc)

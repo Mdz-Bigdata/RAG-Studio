@@ -14,7 +14,7 @@ from prism.config import EmbeddingConfig, LLMConfig, RerankConfig
 from prism.generation.llm import AnthropicLLM, BaseLLM, OpenAICompatibleLLM
 from prism.index.embeddings import BaseEmbedder, HashEmbedder, OpenAICompatibleEmbedder, SentenceTransformerEmbedder
 from prism.ingest.parsers.mineru_parser import mineru_available
-from prism.multimodal import APIImageEmbedder, BaseImageEmbedder, CLIPEmbedder, PerceptualImageEmbedder, available_ocr, build_image_embedder, clip_available
+from prism.multimodal import APIImageEmbedder, BaseImageEmbedder, CLIPEmbedder, PerceptualImageEmbedder, available_ocr, build_image_embedder, build_wemm, clip_available, is_wemm, wemm_available
 from prism.retrieval.rerank import (
     BaseReranker,
     CohereReranker,
@@ -102,7 +102,7 @@ class ModelService:
                 logger.warning("config.yaml 的 openai_compatible embedding 不可用：%s", exc)
         return HashEmbedder(dim=512), {"source": "fallback", "provider": "hash", "model": "hash-512", "offline": True}
 
-    # --- 图文向量（CLIP 类双塔模型）-----------------------------------------------------
+    # --- 图文向量（CLIP 类双塔模型 / WeMM 全模态模型）--------------------------------------
     def _image_key(self, cfg: ModelConfig | None) -> str:
         return _sig(cfg) + ":" + settings_service.get().multimodal.embedding.model_dump_json()
 
@@ -121,11 +121,13 @@ class ModelService:
         base = settings_service.get().multimodal.embedding
         if cfg is not None:
             try:
-                if cfg.provider_type == "local":
-                    emb: BaseImageEmbedder = CLIPEmbedder(cfg.model_name, device=base.device, batch_size=base.batch_size, max_text_tokens=base.max_text_tokens)
+                if is_wemm(cfg.model_name):
+                    emb: BaseImageEmbedder = build_wemm(base, model=cfg.model_name, base_url=cfg.base_url, api_key=cfg.api_key, remote=cfg.provider_type != "local")
+                elif cfg.provider_type == "local":
+                    emb = CLIPEmbedder(cfg.model_name, device=base.device, batch_size=base.batch_size, max_text_tokens=base.max_text_tokens)
                 else:
                     emb = APIImageEmbedder(cfg.model_name, base_url=cfg.base_url or "", api_key=cfg.api_key)
-                return emb, {"source": "config", "provider": cfg.provider_name, "model": cfg.model_name, "offline": False, "crossModal": True, "loaded": True}
+                return emb, {"source": "config", "provider": cfg.provider_name, "model": cfg.model_name, "offline": False, "crossModal": True, "videoNative": emb.video_native, "loaded": True}
             except Exception as exc:
                 logger.warning("激活的图文向量配置不可用（%s），回退", exc)
         try:
@@ -134,8 +136,8 @@ class ModelService:
             logger.warning("config.yaml 的图文向量模型不可用（%s），使用离线感知特征", exc)
             emb = PerceptualImageEmbedder()
         if emb.cross_modal:
-            return emb, {"source": "config.yaml", "provider": emb.name, "model": emb.model_name, "offline": False, "crossModal": True, "loaded": True}
-        return emb, {"source": "fallback", "provider": emb.name, "model": emb.model_name, "offline": True, "crossModal": False, "loaded": True}
+            return emb, {"source": "config.yaml", "provider": emb.name, "model": emb.model_name, "offline": False, "crossModal": True, "videoNative": emb.video_native, "loaded": True}
+        return emb, {"source": "fallback", "provider": emb.name, "model": emb.model_name, "offline": True, "crossModal": False, "videoNative": False, "loaded": True}
 
     def image_embedder_status(self) -> dict:
         """不加载模型：已加载则报告实际状态，否则报告"将会使用什么"。"""
@@ -145,10 +147,13 @@ class ModelService:
                 return self._image_embedder[2]
         base = settings_service.get().multimodal.embedding
         if cfg is not None:
-            return {"source": "config", "provider": cfg.provider_name, "model": cfg.model_name, "offline": False, "crossModal": True, "loaded": False}
+            return {"source": "config", "provider": cfg.provider_name, "model": cfg.model_name, "offline": False, "crossModal": True, "videoNative": is_wemm(cfg.model_name), "loaded": False}
+        if base.provider in ("wemm", "wemm_api") or (is_wemm(base.model) and base.provider != "perceptual" and (base.provider != "auto" or wemm_available())):
+            model = base.model if is_wemm(base.model) else "tencent/WeMM-Embedding-2B"
+            return {"source": "config.yaml", "provider": "wemm_api" if base.provider in ("api", "wemm_api") else "wemm", "model": model, "offline": False, "crossModal": True, "videoNative": True, "loaded": False}
         if base.provider == "api" or base.provider == "clip" or (base.provider == "auto" and clip_available()):
-            return {"source": "config.yaml", "provider": "api" if base.provider == "api" else "clip", "model": base.model, "offline": False, "crossModal": True, "loaded": False}
-        return {"source": "fallback", "provider": "perceptual", "model": "perceptual-v1", "offline": True, "crossModal": False, "loaded": False}
+            return {"source": "config.yaml", "provider": "api" if base.provider == "api" else "clip", "model": base.model, "offline": False, "crossModal": True, "videoNative": False, "loaded": False}
+        return {"source": "fallback", "provider": "perceptual", "model": "perceptual-v1", "offline": True, "crossModal": False, "videoNative": False, "loaded": False}
 
     # --- LLM ------------------------------------------------------------------------
     def llm(self, *, aux: bool = False, multimodal: bool = False) -> BaseLLM | None:

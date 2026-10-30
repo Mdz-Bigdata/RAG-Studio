@@ -1,6 +1,7 @@
 // 长期记忆（LanceDB 表 memories）：按用户记住身份、偏好、事实；召回 = 相似度 × 新近度 × 重要度；可抽取、编辑、遗忘。
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Brain, Eraser, MessageSquareQuote, Pencil, Plus, Search, Sparkles, Trash2 } from 'lucide-react';
+// 多模态记忆开启时，一条记忆可以附带一张图片或一段短视频，召回也可以拿图片当查询（以图召回）。
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Brain, Eraser, Film, ImagePlus, MessageSquareQuote, Paperclip, Pencil, Plus, Search, Sparkles, Trash2, X } from 'lucide-react';
 import { ApiError } from '../api/client';
 import { fmtTime, memoryApi, type LanceVersion, type MemoryItem, type MemoryKind, type MemoryStats } from '../api/lance';
 import { Badge, Button, Callout, Empty, Modal, ScoreBar, Spinner, Tabs, confirmDialog } from '../components/ui';
@@ -15,6 +16,49 @@ const KINDS: { value: MemoryKind; label: string; tone: string }[] = [
 ];
 const kindOf = (k: string) => KINDS.find((x) => x.value === k) ?? { value: k as MemoryKind, label: k, tone: '' };
 const errText = (e: unknown) => (e instanceof ApiError ? e.message : String(e));
+const MAX_MEDIA_MB = 200;   // 与后端上限一致
+
+interface PickedMedia { dataUrl: string; name: string; video: boolean }
+
+function readAsDataUrl(file: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result as string);
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(file);
+  });
+}
+
+/** 选一个图片（或短视频）文件：未选时是一个按钮，选中后显示缩略图 / 文件名与移除按钮。 */
+function MediaPicker({ value, onChange, accept, label, title }: { value: PickedMedia | null; onChange: (v: PickedMedia | null) => void; accept: string; label: string; title?: string }) {
+  const { toast } = useApp();
+  const ref = useRef<HTMLInputElement>(null);
+  const take = async (file?: File | null) => {
+    if (!file) return;
+    if (file.size > MAX_MEDIA_MB * 1024 * 1024) { toast(`文件超过 ${MAX_MEDIA_MB}MB`, 'warn'); return; }
+    onChange({ dataUrl: await readAsDataUrl(file), name: file.name, video: file.type.startsWith('video/') });
+  };
+  return (
+    <>
+      <input ref={ref} type="file" hidden accept={accept} onChange={(e) => { take(e.target.files?.[0]); e.target.value = ''; }} />
+      {value ? (
+        <span className="row gap-6" style={{ minWidth: 0 }}>
+          {value.video ? <Badge><Film size={10} />视频</Badge> : <img src={value.dataUrl} alt="" style={{ width: 40, height: 30, objectFit: 'cover', borderRadius: 4, border: '1px solid var(--border)', flexShrink: 0 }} />}
+          <span className="xs ellipsis" style={{ maxWidth: 160 }} title={value.name}>{value.name}</span>
+          <Button size="xs" variant="ghost" icon onClick={() => onChange(null)} aria-label="移除"><X size={11} /></Button>
+        </span>
+      ) : <Button size="sm" onClick={() => ref.current?.click()} title={title}><Paperclip size={13} />{label}</Button>}
+    </>
+  );
+}
+
+/** 记忆附带的媒体：图片缩略图（点开看原图）或可播放的短视频。 */
+function MemoryMedia({ item, size = 72 }: { item: MemoryItem; size?: number }) {
+  if (!item.mediaUrl || !item.mediaType) return null;
+  return item.mediaType === 'video'
+    ? <video src={item.mediaUrl} controls preload="metadata" style={{ display: 'block', width: size * 2.5, maxWidth: '100%', borderRadius: 6, background: '#000', marginTop: 6 }} />
+    : <a href={item.mediaUrl} target="_blank" rel="noreferrer" title="查看原图"><img src={item.mediaUrl} alt="" loading="lazy" style={{ display: 'block', height: size, maxWidth: size * 2, objectFit: 'contain', borderRadius: 6, border: '1px solid var(--border)', background: '#fff', marginTop: 6 }} /></a>;
+}
 
 export function MemoryPage() {
   const { identity, toast } = useApp();
@@ -64,6 +108,7 @@ export function MemoryPage() {
         <div className="stat"><div className="label">该用户的记忆</div><div className="value">{mine}</div><div className="sub">全库 {stats?.rows ?? 0} 条 · {stats?.users ?? 0} 个用户</div></div>
         <div className="stat"><div className="label">按类型</div><div className="value" style={{ fontSize: 13, paddingTop: 8, lineHeight: 1.5 }}>{KINDS.map((k) => `${k.label} ${stats?.byKind?.[k.value] ?? 0}`).join(' · ')}</div><div className="sub">身份 / 偏好 / 事实 / 任务 / 经历</div></div>
         <div className="stat"><div className="label">向量模型</div><div className="value" style={{ fontSize: 15, paddingTop: 6 }}>{stats?.model ?? stats?.embedder ?? '—'}</div><div className="sub">{stats?.dim ? `${stats.dim} 维 · 换模型自动重算` : ''}</div></div>
+        {stats?.multimodal ? <div className="stat"><div className="label"><ImagePlus size={12} />多模态记忆</div><div className="value" style={{ fontSize: 15, paddingTop: 6 }}>已开启</div><div className="sub">模型 {stats.multimodal.model ?? stats.multimodal.embedder} · {stats.multimodal.media} 条带媒体</div></div> : null}
       </div>
 
       <Callout icon={<Sparkles size={14} />}>
@@ -72,8 +117,8 @@ export function MemoryPage() {
       </Callout>
 
       <div className="grid grid-2" style={{ alignItems: 'start' }}>
-        <AddCard userId={userId} onDone={load} />
-        <RecallCard userId={userId} />
+        <AddCard userId={userId} multimodal={!!stats?.multimodal} onDone={load} />
+        <RecallCard userId={userId} multimodal={!!stats?.multimodal} />
       </div>
 
       <div className="card">
@@ -95,7 +140,7 @@ export function MemoryPage() {
               <tbody>
                 {items.map((m) => (
                   <tr key={m.id}>
-                    <td style={{ maxWidth: 420 }}><div className="small">{m.content}</div>{m.expiresAt ? <div className="xs faint">到期：{fmtTime(m.expiresAt)}</div> : null}</td>
+                    <td style={{ maxWidth: 420 }}><div className="small">{m.content}</div><MemoryMedia item={m} />{m.expiresAt ? <div className="xs faint">到期：{fmtTime(m.expiresAt)}</div> : null}</td>
                     <td><Badge tone={kindOf(m.kind).tone}>{kindOf(m.kind).label}</Badge></td>
                     <td><div className="row gap-6"><div className="flex-1"><ScoreBar value={m.importance} /></div><span className="mono xs">{m.importance.toFixed(2)}</span></div></td>
                     <td className="num">{m.accessCount}</td>
@@ -116,13 +161,14 @@ export function MemoryPage() {
   );
 }
 
-function AddCard({ userId, onDone }: { userId: string; onDone: () => void }) {
+function AddCard({ userId, multimodal, onDone }: { userId: string; multimodal: boolean; onDone: () => void }) {
   const { toast } = useApp();
   const [tab, setTab] = useState<'manual' | 'extract'>('manual');
   const [content, setContent] = useState('');
   const [kind, setKind] = useState<MemoryKind>('preference');
   const [importance, setImportance] = useState(0.7);
   const [ttl, setTtl] = useState<number | ''>('');
+  const [media, setMedia] = useState<PickedMedia | null>(null);
   const [text, setText] = useState('我叫李明，在财务部做报销审核。以后回答请先给结论，再讲细节。');
   const [extracted, setExtracted] = useState<MemoryItem[] | null>(null);
   const [busy, setBusy] = useState(false);
@@ -131,9 +177,10 @@ function AddCard({ userId, onDone }: { userId: string; onDone: () => void }) {
     if (!content.trim()) return;
     setBusy(true);
     try {
-      const r = await memoryApi.add({ userId, content, kind, importance, ttlDays: ttl || null });
+      const r = await memoryApi.add({ userId, content, kind, importance, ttlDays: ttl || null, mediaB64: media?.dataUrl ?? null, mediaName: media?.name ?? null });
       toast(r.action === 'updated' ? '与已有记忆近似：已合并更新' : '已记住', 'ok');
       setContent('');
+      setMedia(null);
       onDone();
     } catch (e) {
       toast(errText(e), 'bad');
@@ -167,7 +214,11 @@ function AddCard({ userId, onDone }: { userId: string; onDone: () => void }) {
               <label className="row gap-6" style={{ whiteSpace: 'nowrap' }}>重要度<input type="range" min={0} max={1} step={0.05} value={importance} onChange={(e) => setImportance(Number(e.target.value))} /><span className="mono">{importance.toFixed(2)}</span></label>
               <label className="row gap-6" style={{ whiteSpace: 'nowrap' }} title="到期后不再召回，遗忘清理时删除">有效期<input type="number" min={1} value={ttl} placeholder="永久" onChange={(e) => setTtl(e.target.value === '' ? '' : Number(e.target.value))} style={{ width: 70 }} />天</label>
             </div>
-            <div><Button variant="primary" onClick={add} loading={busy}><Plus size={13} />记住</Button></div>
+            <div className="row gap-8 wrap">
+              <Button variant="primary" onClick={add} loading={busy}><Plus size={13} />记住</Button>
+              <MediaPicker value={media} onChange={setMedia} accept="image/*,video/*" label="附带图片 / 短视频" title="图片或短视频和这条记忆一起保存，并编码进图文向量空间，之后可以以图召回" />
+              {!multimodal ? <span className="xs faint">附带媒体需要开启多模态记忆（memory.multimodal）</span> : null}
+            </div>
           </>
         ) : (
           <>
@@ -183,15 +234,17 @@ function AddCard({ userId, onDone }: { userId: string; onDone: () => void }) {
   );
 }
 
-function RecallCard({ userId }: { userId: string }) {
+function RecallCard({ userId, multimodal }: { userId: string; multimodal: boolean }) {
   const { toast } = useApp();
   const [query, setQuery] = useState('报销单应该怎么提交');
+  const [image, setImage] = useState<PickedMedia | null>(null);
   const [hits, setHits] = useState<MemoryItem[] | null>(null);
   const [loading, setLoading] = useState(false);
   const run = async () => {
+    if (!query.trim() && !image) { toast('请输入问题或选择一张图片', 'warn'); return; }
     setLoading(true);
     try {
-      setHits(await memoryApi.search({ userId, query, topK: 5 }));
+      setHits(await memoryApi.search({ userId, query: query.trim(), imageB64: image?.dataUrl ?? null, topK: 5 }));
     } catch (e) {
       toast(errText(e), 'bad');
     } finally {
@@ -203,14 +256,16 @@ function RecallCard({ userId }: { userId: string }) {
     <div className="card">
       <div className="card-header"><h3><Search size={14} />召回测试</h3><span className="xs faint">score = 0.7·相似度 + 0.15·新近度 + 0.15·重要度</span></div>
       <div className="card-body col gap-12">
-        <div className="row gap-8"><input className="flex-1" value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && run()} placeholder="用户的新问题" /><Button variant="primary" onClick={run} loading={loading}><Search size={13} />召回</Button></div>
+        <div className="row gap-8"><input className="flex-1" value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && run()} placeholder={image ? '可选：补充一句文字，和图片一起召回' : '用户的新问题'} /><Button variant="primary" onClick={run} loading={loading}><Search size={13} />召回</Button></div>
+        {multimodal ? <div className="row gap-8"><MediaPicker value={image} onChange={setImage} accept="image/*" label="以图召回" title="用一张图片召回记忆：与记忆附带的图片 / 视频在图文向量空间里比相似度" /><span className="xs faint">可以只给图片、不写文字</span></div> : null}
         {hits === null ? <div className="xs faint">问答时就是这样为当前问题挑选记忆的（测试不计入"被用到"次数）。</div> : hits.length === 0 ? <Empty title="没有相关记忆" /> : (
           <div className="col gap-6">
             {hits.map((h) => (
               <div key={h.id} className="chunk">
                 <div className="chunk-head"><span className="ellipsis">{h.content}</span><span className="mono">{(h.score ?? 0).toFixed(3)}</span></div>
                 <ScoreBar value={h.score ?? 0} max={best} />
-                <div className="row gap-12 xs faint mt-4"><span>相似度 {(h.similarity ?? 0).toFixed(3)}</span><span>新近度 {(h.recency ?? 0).toFixed(3)}</span><span>重要度 {h.importance.toFixed(2)}</span><Badge tone={kindOf(h.kind).tone}>{kindOf(h.kind).label}</Badge></div>
+                <MemoryMedia item={h} size={56} />
+                <div className="row gap-12 xs faint mt-4"><span>相似度 {(h.similarity ?? 0).toFixed(3)}</span>{h.mmSimilarity !== null && h.mmSimilarity !== undefined ? <span title="与查询在图文向量空间里的相似度（记忆附带的图片 / 视频）">图文相似度 {h.mmSimilarity.toFixed(3)}</span> : null}<span>新近度 {(h.recency ?? 0).toFixed(3)}</span><span>重要度 {h.importance.toFixed(2)}</span><Badge tone={kindOf(h.kind).tone}>{kindOf(h.kind).label}</Badge></div>
               </div>
             ))}
           </div>

@@ -1,4 +1,4 @@
-"""多模态检索服务：文搜图 / 图搜图 / 图文混合 / 图搜文 / 文搜视频，图片库浏览，视频播放，以及问答里的图片侧。"""
+"""多模态检索服务：文搜图 / 图搜图 / 图文混合 / 图搜文 / 文搜视频 / 图搜视频，内容查重与相似推荐，图片库浏览，视频播放，以及问答里的图片侧。"""
 
 from __future__ import annotations
 
@@ -33,6 +33,9 @@ ROUTE_LABELS = {
     "caption:sparse": "图片转文字 · BM25",
     "lance_mm": "LanceDB 多模态表 · 图片文字全文（ICU 分词）",
     "lance_mm:image→text": "LanceDB 多模态表 · 图 → 正文（CLIP + 图中文字）",
+    "video": "视频向量（文本 → 整段视频，WeMM）",
+    "video_joint": "视频 + 字幕向量（文本 → 画面与台词，WeMM）",
+    "video:image→video": "图 → 视频（图片 → 整段视频，WeMM）",
 }
 
 
@@ -87,6 +90,10 @@ class MultimodalService:
             if not query:
                 raise ValueError("文搜视频需要输入文字")
             result = r.text_to_video(query, top_k=top_k, doc_ids=doc_ids)
+        elif mode == "image2video":
+            if image is None:
+                raise ValueError("图搜视频需要上传图片")
+            result = r.image_to_video(image, top_k=top_k, doc_ids=doc_ids)
         else:
             raise ValueError(f"未知检索模式：{mode}")
         return self.to_response(kb_id, result)
@@ -160,6 +167,56 @@ class MultimodalService:
             "embedder": result.embedder or index.images.stats(),
         }
 
+    # --- 查重 / 相似 ----------------------------------------------------------------------
+    def similar(self, kb_id: str, *, image_id: str | None = None, doc_id: str | None = None, top_k: int = 10, threshold: float | None = None) -> dict[str, Any]:
+        """某张图 / 某个视频片段（image_id）或某个视频（doc_id）的相似内容：相似图片与片段、相似视频（含片段重合度）。"""
+        from .retrieval_service import retrieval_service
+
+        with index_service.reading(kb_id):
+            index = index_service.get(kb_id)
+            d = self.retriever(kb_id).deduper(threshold)
+            names = retrieval_service.doc_names(kb_id)
+            if image_id and index.images.get(image_id) is None:
+                raise ValueError("图片不存在")
+            if doc_id and not any(r.doc_id == doc_id for r in index.images.records.values()):
+                raise ValueError("该文档没有图片 / 视频")
+            rec = index.images.get(image_id) if image_id else None
+            video_doc = doc_id or (rec.doc_id if rec is not None and rec.is_video else None)
+            images = []
+            if image_id:
+                for n, (i, sc) in enumerate(d.similar_images(image_id, top_k)):
+                    r = index.images.get(i)
+                    if r is not None:
+                        images.append({**self.record_view(kb_id, r, names), "score": round(sc, 4), "rank": n + 1, "duplicate": sc >= d.threshold})
+            videos = [self.similar_video_view(kb_id, index, s, names) for s in d.similar_videos(video_doc, top_k)] if video_doc else []
+            return {"imageId": image_id, "docId": video_doc, "threshold": d.threshold, "embedder": index.images.embedder.signature(), "images": images, "videos": videos}
+
+    def similar_video_view(self, kb_id: str, index, s, names: dict[str, str]) -> dict[str, Any]:
+        cover = index.images.get(s.pairs[0][1]) if s.pairs else next((r for r in index.images.of_document(s.doc_id)), None)
+        return {"docId": s.doc_id, "fileName": names.get(s.doc_id), "videoUrl": self.video_url(kb_id, s.doc_id), "score": round(s.score, 4), "overlap": round(s.overlap, 4),
+                "duplicate": s.duplicate, "cover": self.image_url(kb_id, cover.image_id) if cover else None,
+                "pairs": [{"source": self.record_view(kb_id, index.images.get(a), names), "match": self.record_view(kb_id, index.images.get(b), names), "score": round(sc, 4)}
+                          for a, b, sc in s.pairs[:20] if index.images.get(a) and index.images.get(b)]}
+
+    def duplicates(self, kb_id: str, *, threshold: float | None = None, kinds: list[str] | None = None) -> dict[str, Any]:
+        """全库查重：重复的图片组、重复（片段高度重合）的视频组。"""
+        from .retrieval_service import retrieval_service
+
+        with index_service.reading(kb_id):
+            index = index_service.get(kb_id)
+            d = self.retriever(kb_id).deduper(threshold)
+            names = retrieval_service.doc_names(kb_id)
+            groups = []
+            for g in d.duplicate_groups(tuple(kinds or ("image", "video"))):
+                if g.kind == "image":
+                    items = [self.record_view(kb_id, index.images.get(i), names) for i in g.ids if index.images.get(i)]
+                else:
+                    items = [{"docId": i, "fileName": names.get(i), "videoUrl": self.video_url(kb_id, i),
+                              "cover": next((self.image_url(kb_id, r.image_id) for r in index.images.of_document(i)), None)} for i in g.ids]
+                groups.append({"kind": g.kind, "score": round(g.score, 4), "items": items})
+            return {"threshold": d.threshold, "overlap": d.overlap, "embedder": index.images.embedder.signature(), "groups": groups,
+                    "images": sum(1 for r in index.images.records.values() if not r.is_video), "videos": len(d.videos())}
+
     # --- 图片库 ---------------------------------------------------------------------------
     def list_images(self, kb_id: str, doc_id: str | None = None) -> list[dict[str, Any]]:
         from .retrieval_service import retrieval_service
@@ -195,15 +252,17 @@ class MultimodalService:
         frames = [r for r in index.images.records.values() if r.is_video]
         return {
             "enabled": s.enabled, "images": len(index.images), "documentsWithImages": len({r.doc_id for r in index.images.records.values()}),
-            "videos": len({r.doc_id for r in frames}), "videoFrames": len(frames), "video": {"enabled": s.video.enabled, "backend": video_backend()},
+            "videos": len({r.doc_id for r in frames}), "videoFrames": len(frames),
+            "video": {"enabled": s.video.enabled, "backend": video_backend(), "vectors": len(index.images.video),
+                      "jointVectors": sum(1 for r in frames if r.subtitle.strip() and r.clip) if len(index.images.video_joint) else 0},   # 带字幕（联合向量与纯视频向量不同）的片段数
             "described": sum(1 for r in index.images.records.values() if r.description), "withOcr": sum(1 for r in index.images.records.values() if r.ocr_text),
             "embedder": rt["imageEmbedding"], "indexEmbedder": index.images.stats(), "vision": rt["vision"], "ocr": rt["ocr"],
             "defaults": {"topK": s.top_k, "alpha": s.hybrid_alpha, "minScore": s.min_score, "rrfK": s.rrf_k},
-            "routes": self.active_routes(s, bool(rt["imageEmbedding"].get("crossModal")), len(index.images) > 0),
+            "routes": self.active_routes(s, bool(rt["imageEmbedding"].get("crossModal")), len(index.images) > 0, video_native=bool(rt["imageEmbedding"].get("videoNative"))),
         }
 
     @staticmethod
-    def active_routes(s, cross_modal: bool, has_images: bool) -> dict[str, list[str]]:
+    def active_routes(s, cross_modal: bool, has_images: bool, *, video_native: bool = False) -> dict[str, list[str]]:
         """文搜图 / 图搜文实际参与 RRF 融合的召回路，前端按它生成说明。与 MultimodalRetriever 的分支保持一致：
         没有文本塔就没有图文向量 / 直达路；权重为 0 的路不参与融合；LanceDB 多模态表路要开关打开、权重 > 0 且装了 lancedb。"""
         from prism.lance import lancedb_available
@@ -213,7 +272,9 @@ class MultimodalService:
                                ("desc_sparse", s.weight_desc_sparse > 0), ("lance_mm", lance)) if on]
         i2t = [k for k, on in (("clip:image→chunk", cross_modal and s.weight_clip > 0), ("neighbor:image→image→chunk", has_images),
                                ("caption:dense", True), ("caption:sparse", True), ("lance_mm:image→text", lance and cross_modal)) if on]
-        return {"text2image": t2i, "image2text": i2t, "text2video": t2i}
+        t2v = t2i + [k for k, on in (("video", video_native and s.video.weight_video > 0), ("video_joint", video_native and s.video.weight_video_joint > 0)) if on]
+        i2v = ["visual"] + (["video:image→video"] if video_native and s.video.weight_video > 0 else [])
+        return {"text2image": t2i, "image2text": i2t, "text2video": t2v, "image2video": i2v}
 
     # --- 问答 -----------------------------------------------------------------------------
     def images_for_answer(self, kb_id: str, query: str, contexts: list[Context], *, doc_ids: set[str] | None = None) -> tuple[list[ImageHit], MultimodalResult]:

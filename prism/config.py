@@ -363,17 +363,27 @@ class RetrievalConfig(BaseModel):
 
 
 class ImageEmbeddingConfig(BaseModel):
-    """图文统一嵌入（CLIP 类双塔模型）：文本与图片映射到同一向量空间 → 文搜图 / 图搜图 / 图搜文。"""
+    """图文统一嵌入：文本与图片（WeMM 还有视频）映射到同一向量空间 → 文搜图 / 图搜图 / 图搜文 / 文搜视频。"""
 
     # auto：已安装 torch + transformers 用 clip，否则回退 perceptual（离线感知特征，只支持图搜图，文搜图走描述文本）
-    provider: Literal["auto", "clip", "api", "perceptual"] = "auto"
-    model: str = "OFA-Sys/chinese-clip-vit-base-patch16"   # 中文用 Chinese-CLIP；英文可用 openai/clip-vit-base-patch32
+    # wemm：腾讯 WeMM-Embedding 本地推理（文本 / 图片 / 视频 / 视频 + 字幕同一空间，见 prism/multimodal/wemm.py）；
+    # wemm_api：vLLM 部署的 WeMM（base_url 指向 vLLM 的 /v1）。model 名里带 wemm 时 clip / api 也会自动按 WeMM 加载
+    provider: Literal["auto", "clip", "api", "perceptual", "wemm", "wemm_api"] = "auto"
+    model: str = "OFA-Sys/chinese-clip-vit-base-patch16"   # 中文用 Chinese-CLIP；英文可用 openai/clip-vit-base-patch32；WeMM：tencent/WeMM-Embedding-2B
     device: str | None = None            # cpu / cuda / mps；None = 有 CUDA 用 CUDA，否则 CPU（MPS 在多线程服务里会崩，需显式开启）
     batch_size: int = 16
     max_text_tokens: int | None = None   # None = 按模型自动（CLIP 77 / Chinese-CLIP 64）
     base_url: str | None = None          # api：Jina 兼容多模态 /embeddings 端点
     api_key_env: str = "IMAGE_EMBEDDING_API_KEY"
     api_key: str | None = None
+    # --- WeMM
+    dim: int | None = None               # Matryoshka 降维（如 512 / 1024）；None = 全长（2B 2048 维）
+    image_max_pixels: int = 1024 * 32 * 32   # 送入模型的图片像素上限（约 1024 个视觉 token），报表 / 扫描件文字越小越要给够
+    image_min_pixels: int = 256 * 32 * 32    # 小图放大到的像素下限：缩略图 / 压缩转发版与原图才能认成同一张
+    video_max_pixels: int = 256 * 32 * 32    # 视频每帧像素上限（官方评测取值）
+    video_max_frames: int = 16           # 每个片段送入模型的帧数上限（均匀抽取）
+    dual_pass: bool = True               # 视频：一次前向同时取纯视频向量与视频 + 字幕向量；False = 两次前向
+    instructions: dict[str, str] = {}    # 覆盖默认检索指令：image / video（文本查询前缀）、subtitle（字幕前缀）
 
 
 class VideoConfig(BaseModel):
@@ -391,6 +401,12 @@ class VideoConfig(BaseModel):
     max_frames: int = 200                # 每个视频最多保留的关键帧数（超出时按画面变化程度保留）
     max_duration_minutes: float = 120.0  # 只分析前 N 分钟
     segment_gap_seconds: float = 2.0     # 文搜视频：同一镜头里间隔不超过它的命中片段连成一段（跨镜头不连）
+    # 视频原生向量（图文向量模型能直接编码视频时，如 WeMM）：每个片段另存若干采样帧，整段编码成"纯视频"与"视频 + 字幕"两种向量，
+    # 文搜视频多两路召回。采样帧以小图存在关键帧旁边，换模型时可以直接重算，不用重新解析视频
+    clip_frames: int = 16                # 每个片段保存的采样帧数
+    clip_frame_side: int = 512           # 采样帧最长边
+    weight_video: float = 1.0            # 文本 → 纯视频向量
+    weight_video_joint: float = 1.0      # 文本 → 视频 + 字幕向量（没有字幕的片段即纯视频向量）
 
 
 class MultimodalConfig(BaseModel):
@@ -424,6 +440,8 @@ class MultimodalConfig(BaseModel):
     weight_lance_mm: float = 1.0
     hybrid_alpha: float = 0.5            # 图文混合检索的文本权重：score = α·z(text·I) + (1-α)·z(image·I)
     min_score: float | None = None       # 图搜图余弦相似度阈值（低于则过滤），例如 0.7
+    # 内容查重：图片 / 视频之间的向量余弦达到它算重复（翻拍、转码、裁边、加水印）。None = 按模型自动
+    dedup_threshold: float | None = None
     # 图搜文：相似图片达到该相似度时，其所在段落作为候选。None = 按模型自动
     # （CLIP 图-图余弦普遍偏高：无关图也有 0.7~0.85，取 0.9；离线感知特征取 0.7）
     neighbor_min_score: float | None = None
@@ -499,6 +517,9 @@ class MemoryConfig(BaseModel):
     w_similarity: float = 0.7
     w_recency: float = 0.15
     w_importance: float = 0.15
+    # 多模态记忆：记忆可以附带图片 / 短视频，并在图文向量空间（如 WeMM）里另存一份向量——文字能召回图片记忆，
+    # 上传一张图也能召回相关的文字 / 图片记忆。需要跨模态的图文向量模型，第一次使用时加载
+    multimodal: bool = False
 
 
 class RecommendConfig(BaseModel):

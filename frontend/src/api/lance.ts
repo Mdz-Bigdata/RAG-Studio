@@ -71,18 +71,21 @@ export interface MemoryItem {
   id: string; content: string; userId: string; agentId: string; kind: MemoryKind; importance: number; source: string; sessionId: string; tags: string[];
   createdAt: number; updatedAt: number; lastAccess: number; accessCount: number; expiresAt: number;
   score?: number; similarity?: number; recency?: number; action?: 'created' | 'updated';
+  mediaType?: 'image' | 'video' | null; mediaUrl?: string | null;   // 附带的图片 / 短视频（多模态记忆）
+  mmSimilarity?: number | null;                                      // 召回时与查询图 / 文字在图文向量空间的相似度
 }
 export interface MemoryStats {
   rows: number; users: number; byKind: Record<string, number>; byUser: Record<string, number>; byAgent?: Record<string, number>;
   table?: LanceTableInfo; embedder?: string; model?: string | null; dim?: number;
+  multimodal?: { rows: number; media: number; embedder: string; model: string | null };   // 仅多模态记忆开启时
 }
 
 export const memoryApi = {
   list: (params: { userId?: string; agentId?: string; kind?: string; keyword?: string; limit?: number }) => req<MemoryItem[]>(`/memory${qs(params)}`),
-  add: (body: { userId: string; content: string; kind: MemoryKind; importance: number; ttlDays?: number | null; tags?: string[] }) => req<MemoryItem>('/memory', post(body)),
+  add: (body: { userId: string; content: string; kind: MemoryKind; importance: number; ttlDays?: number | null; tags?: string[]; mediaB64?: string | null; mediaName?: string | null }) => req<MemoryItem>('/memory', post(body)),
   update: (id: string, body: { content?: string; kind?: MemoryKind; importance?: number }) => req<MemoryItem>(`/memory/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   remove: (id: string) => req<{ ok: boolean }>(`/memory/${id}`, { method: 'DELETE' }),
-  search: (body: { userId: string; query: string; topK?: number; minScore?: number; kinds?: string[] | null }) => req<MemoryItem[]>('/memory/search', post(body)),
+  search: (body: { userId: string; query: string; imageB64?: string | null; topK?: number; minScore?: number; kinds?: string[] | null }) => req<MemoryItem[]>('/memory/search', post(body)),
   extract: (body: { userId: string; text: string; answer?: string }) => req<MemoryItem[]>('/memory/extract', post(body)),
   forget: (body: { userId?: string | null; minKeepScore?: number }) => req<{ expired: number; decayed: number }>('/memory/forget', post(body)),
   clearUser: (userId: string) => req<{ deleted: number }>(`/memory/user/${encodeURIComponent(userId)}`, { method: 'DELETE' }),

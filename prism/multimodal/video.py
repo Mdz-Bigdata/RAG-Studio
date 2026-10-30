@@ -5,9 +5,10 @@
         ├─ 画面漂移：和本片段第一帧的差异 > drift_threshold（推拉摇移、幻灯片翻页）
         └─ 片段过长：> max_segment_seconds 强制切开，之后画面没变的相邻片段再合并回去
     → 太短的片段（闪白 / 转场）并入前一段，连续的短片段（快速运动）合成一段 → 超过 max_frames 时反复合并最相似的相邻片段
-    → 每段取中间部分最清晰（拉普拉斯方差最大）的一帧作为关键帧
+    → 每段取中间部分最清晰（拉普拉斯方差最大）的一帧作为关键帧，另外均匀留 clip_frames 张小图（采样帧）
 
 关键帧此后和文档里抽出的图片完全一样：CLIP 图文向量 + OCR + VLM 描述 + BM25，文搜图的各路召回直接可用。
+图文向量模型能直接编码视频时（WeMM），采样帧把整个片段编码成"纯视频"与"视频 + 字幕"两种向量，文搜视频多两路召回。
 文搜视频再把命中的关键帧按视频、按时间合并成连续片段（group_segments）。
 
 解码优先用 ffmpeg 命令行（格式最全，还能读内嵌字幕），没有就用 opencv。都没有则视频不可入库。
@@ -219,12 +220,18 @@ class _Segment:
     shot: int = 0          # 镜头序号：只在硬切处递增，长镜头因画面漂移 / 超长切出的片段属于同一个镜头
     frames: list[tuple[float, Any, _Feat]] = field(default_factory=list)
     key: tuple[float, Any, _Feat] | None = None
+    clip: list[tuple[float, bytes]] = field(default_factory=list)   # 采样帧（时刻, JPEG）
 
-    def pick_key(self) -> None:
-        """片段中间 60% 里最清晰的一帧（避开转场的拖影和淡入淡出）。"""
+    def pick_key(self, clip_frames: int = 0, clip_side: int = 512) -> None:
+        """片段中间 60% 里最清晰的一帧（避开转场的拖影和淡入淡出）；另外均匀留 clip_frames 张采样帧（JPEG 小图）。"""
+        from .wemm import jpeg_bytes
+
         n = len(self.frames)
         lo, hi = int(n * 0.2), max(int(n * 0.2) + 1, int(np.ceil(n * 0.8)))
         self.key = max(self.frames[lo:hi], key=lambda f: f[2].sharp)
+        if clip_frames > 0:
+            idx = sorted({int(i) for i in np.linspace(0, n - 1, min(n, clip_frames)).round()})
+            self.clip = [(self.frames[i][0], jpeg_bytes(self.frames[i][1], clip_side)) for i in idx]
         self.frames = []          # 只留关键帧，释放内存
 
 
@@ -238,7 +245,7 @@ def segment_video(frames: Iterator[tuple[float, Any]], cfg: VideoConfig, *, step
         if cur is not None and prev is not None:
             cut = frame_distance(prev, f) > cfg.scene_threshold
             if cut or frame_distance(cur.frames[0][2], f) > cfg.drift_threshold or t - cur.start >= cfg.max_segment_seconds:
-                cur.pick_key()
+                cur.pick_key(cfg.clip_frames, cfg.clip_frame_side)
                 segs.append(cur)
                 cur = None
                 shot += cut
@@ -248,9 +255,13 @@ def segment_video(frames: Iterator[tuple[float, Any]], cfg: VideoConfig, *, step
         cur.end = t + step
         prev = f
     if cur is not None and cur.frames:
-        cur.pick_key()
+        cur.pick_key(cfg.clip_frames, cfg.clip_frame_side)
         segs.append(cur)
-    return _merge(segs, cfg)
+    out = _merge(segs, cfg)
+    for s in out:              # 合并过的片段采样帧变多了，均匀抽回 clip_frames 张
+        if len(s.clip) > cfg.clip_frames:
+            s.clip = [s.clip[int(i)] for i in np.linspace(0, len(s.clip) - 1, cfg.clip_frames).round()]
+    return out
 
 
 def _merge(segs: list[_Segment], cfg: VideoConfig) -> list[_Segment]:
@@ -265,9 +276,11 @@ def _merge(segs: list[_Segment], cfg: VideoConfig) -> list[_Segment]:
         if not run:
             return
         if run[-1].end - run[0].start >= cfg.min_segment_seconds or not out:
-            out.append(_Segment(start=run[0].start, end=run[-1].end, shot=run[0].shot, key=max((r.key for r in run), key=lambda k: k[2].sharp)))  # type: ignore[arg-type, return-value, union-attr]
+            out.append(_Segment(start=run[0].start, end=run[-1].end, shot=run[0].shot, key=max((r.key for r in run), key=lambda k: k[2].sharp),  # type: ignore[arg-type, return-value, union-attr]
+                                clip=[c for r in run for c in r.clip]))
         else:
             out[-1].end = run[-1].end
+            out[-1].clip += [c for r in run for c in r.clip]
         run.clear()
 
     for s in segs:
@@ -279,6 +292,7 @@ def _merge(segs: list[_Segment], cfg: VideoConfig) -> list[_Segment]:
     flush()
     if len(out) > 1 and out[0].end - out[0].start < cfg.min_segment_seconds:
         out[1].start = out[0].start
+        out[1].clip = out[0].clip + out[1].clip
         out.pop(0)
     # 纯色片段（黑场 / 白场 / 淡入淡出）没有可检索的内容：不出关键帧，也不占 max_frames 的名额
     out = [s for s in out if s.key[2].detail >= _BLANK]  # type: ignore[index]
@@ -289,6 +303,7 @@ def _merge(segs: list[_Segment], cfg: VideoConfig) -> list[_Segment]:
     def join(i: int) -> None:
         a, b = out[i], out[i + 1]
         a.end = b.end
+        a.clip += b.clip
         if b.key[2].sharp > a.key[2].sharp and b.end - b.start > a.end - a.start:  # type: ignore[index]
             a.key = b.key
         out.pop(i + 1)
@@ -402,7 +417,8 @@ def extract_video_frames(path: Path, cfg: MultimodalConfig) -> list[Any]:
         t, im, _f = s.key  # type: ignore[misc]
         said = " ".join(text for a, b, text in subs if a < s.end and b > s.start)
         out.append(ExtractedImage(image=im, sha1=pixel_sha1(im), origin="video", time=round(t, 2), time_start=round(s.start, 2), time_end=round(s.end, 2), shot=s.shot,
-                                  context=(f"台词 / 字幕：{said}" if said else "")[: cfg.context_chars], meta={"duration": round(duration, 2)}))
+                                  context=(f"台词 / 字幕：{said}" if said else "")[: cfg.context_chars], meta={"duration": round(duration, 2)},
+                                  clip=[jpg for _, jpg in s.clip], clip_times=[round(ct - s.start, 2) for ct, _ in s.clip], subtitle=said))
     try:
         ensure_browser_playable(path)
     except Exception as exc:   # 预览只影响播放，不影响入库

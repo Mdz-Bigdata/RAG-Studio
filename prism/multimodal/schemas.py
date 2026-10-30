@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 from ..schemas import Context, ScoredChunk
 
-SearchMode = Literal["text2image", "image2image", "hybrid", "image2text", "text2video"]
+SearchMode = Literal["text2image", "image2image", "hybrid", "image2text", "text2video", "image2video"]
 
 
 def format_ts(seconds: float | None) -> str:
@@ -38,6 +38,9 @@ class ImageRecord(BaseModel):
     time_start: float | None = None
     time_end: float | None = None
     shot: int | None = None              # 镜头序号：同一镜头的相邻片段在文搜视频里可以连成一段，跨镜头不连
+    clip: list[str] = Field(default_factory=list)          # 片段采样帧文件（相对索引目录），能直接编码视频的模型用它整段编码
+    clip_times: list[float] = Field(default_factory=list)  # 各采样帧相对片段开头的秒数
+    subtitle: str = ""                   # 片段内的字幕 / 台词原文（"视频 + 字幕"向量用）
     doc_title: str = ""
     caption: str = ""                    # 图注 / alt 文本
     ocr_text: str = ""                   # 图中文字（精确数值 / 标签以它为准）
