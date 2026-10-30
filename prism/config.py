@@ -160,7 +160,10 @@ class VectorSearchConfig(BaseModel):
     rescore: bool = True                 # 粗筛后用原始全精度向量重新打分（召回损失接近 0）
     oversample: float = 4.0              # 粗筛取 top_n × oversample 个候选再精算
     ef_search: int = 128                 # qdrant / lancedb(HNSW) 后端：HNSW 搜索宽度，越大越准越慢
-    nprobes: int = 20                    # lancedb 后端：IVF 索引查询时探查的分区数，越大越准越慢
+    nprobes: int = 20                    # lancedb 后端：IVF 索引查询时探查的分区数，越大越准越慢（下限）
+    # lancedb 后端：至少探查这个比例的分区。分区数随数据量增长（约 √行数 / 4），固定的 nprobes 在大库上召回会悄悄变差：
+    # 合成 100 万条 × 1024 维实测，探查 8% / 32% / 64% 的分区，recall@10 = 0.61 / 0.93 / 0.995，p50 = 8 / 6.5 / 11 ms
+    nprobes_ratio: float = 0.3
     refine_factor: int | None = 5        # lancedb 后端：量化索引多取 k×refine 条再用原始向量重排（None = 不重排）
 
 
@@ -169,9 +172,26 @@ class LanceDBConfig(BaseModel):
 
     index_type: Literal["auto", "none", "IVF_HNSW_SQ", "IVF_PQ", "IVF_FLAT"] = "auto"
     index_min_rows: int = 20000          # auto：行数达到才建 ANN 索引（IVF_HNSW_SQ）；不到就精确扫描，召回 100%
-    fts_tokenizer: Literal["icu", "ngram", "whitespace"] = "icu"   # 原生全文索引分词：icu 自带中文分词、无需下载模型
+    # 原生全文索引分词：icu 自带中文分词、无需下载模型；jieba = 写入时用和 BM25 同一套 jieba 分词（含编号精确 token），
+    # 全文索引建在分好的词上——千万级知识库用它替代内存里的 BM25，检索质量与 BM25 路一致
+    fts_tokenizer: Literal["icu", "ngram", "whitespace", "jieba"] = "icu"
     optimize_every: int = 20             # 每 N 次写入做一次 optimize：合并小文件 + 把新数据并入索引
     keep_versions_days: int = 7          # optimize 时清理多少天以前的旧版本（时间旅行可回看的范围）
+
+
+class StorageConfig(BaseModel):
+    """知识库的存储形态。不进入入库指纹：切换时加载索引会自动迁移（段落 jsonl ↔ SQLite），不需要重新解析文档。
+
+    千万级段落的知识库：chunk_store: sqlite + vector_store.backend: lancedb + lancedb.fts_tokenizer: jieba
+    + retrieval.sparse_backend: lancedb_fts——段落按 id 从磁盘读、写入增量提交，向量与全文索引都在磁盘上，
+    时效 / 权限 / 元数据过滤按文档下推到索引里做，常驻内存只剩文档元数据（文档数通常是段落数的 1/20~1/50）。"""
+
+    chunk_store: Literal["memory", "sqlite"] = "memory"   # memory：全部段落常驻内存，保存时整份重写（万~十万级足够）
+    chunk_cache: int = 20000             # sqlite：内存里缓存最近读过的段落数
+    scope_cache: int = 64                # 检索范围（时效 / 权限 / 元数据条件 → 可见文档）按条件缓存多少份，文档变动时失效
+    # 改了入库参数 / 换了向量模型时，段落数超过这个值的知识库不自动整库重建（逐篇重新入库要好几天），
+    # 记为待重建，用 scripts/bulk_import.py --kb <id> --rebuild 批量重建
+    auto_rebuild_max_chunks: int = 2_000_000
 
 
 class VectorStoreConfig(BaseModel):
@@ -566,6 +586,7 @@ class Settings(BaseModel):
     corpus: CorpusConfig = CorpusConfig()
     embedding: EmbeddingConfig = EmbeddingConfig()
     vector_store: VectorStoreConfig = VectorStoreConfig()
+    storage: StorageConfig = StorageConfig()
     sparse: SparseConfig = SparseConfig()
     retrieval: RetrievalConfig = RetrievalConfig()
     multimodal: MultimodalConfig = MultimodalConfig()

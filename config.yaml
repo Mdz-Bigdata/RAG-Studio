@@ -76,9 +76,21 @@ vector_store:
   lancedb:                    # 建索引期参数（改了会重建）；查询期的 nprobes / refine_factor / ef_search 在 vector_store.search
     index_type: auto          # auto（行数 ≥ index_min_rows 自动建 IVF_HNSW_SQ）| none | IVF_HNSW_SQ | IVF_PQ | IVF_FLAT
     index_min_rows: 20000     # 之下精确扫描：召回 100%，万级数据本来就够快
-    fts_tokenizer: icu        # 原生全文索引分词：icu 自带中文分词、无需下载模型
+    fts_tokenizer: icu        # 原生全文索引分词：icu 自带中文分词 | jieba（与 BM25 同一套分词，千万级知识库用它替代内存 BM25）
     optimize_every: 20        # 每 N 次写入 optimize 一次（合并小文件 + 新数据并入索引）
     keep_versions_days: 7     # 时间旅行能回看多少天的旧版本
+
+storage:                      # 存储形态（不触发重建：切换后加载索引时自动迁移段落存储）
+  chunk_store: memory         # memory：段落常驻内存（万~十万级）| sqlite：段落存 chunks.sqlite，按 id 读、增量提交（千万级）
+  chunk_cache: 20000          # sqlite：内存里缓存的段落数
+  scope_cache: 64             # 检索范围（时效 / 权限 / 元数据 → 可见文档）的条件缓存份数
+  auto_rebuild_max_chunks: 2000000   # 超过这么多段落的知识库不自动整库重建（逐篇要好几天），改用 bulk_import.py --rebuild
+  # 千万级段落的知识库，四项一起改：
+  #   storage.chunk_store: sqlite
+  #   vector_store.backend: lancedb          （向量在磁盘上，IVF_HNSW_SQ 索引，按文档预过滤）
+  #   vector_store.lancedb.fts_tokenizer: jieba
+  #   retrieval.sparse_backend: lancedb_fts  （关键词路用磁盘上的全文索引，不再把全部分词结果放在内存里）
+  # 批量导入用 scripts/bulk_import.py，压测用 scripts/scale_bench.py，见 docs/SCALING.md
 
 sparse:
   k1: 1.5                     # 长文档可调到 2.0

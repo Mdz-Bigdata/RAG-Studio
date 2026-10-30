@@ -377,10 +377,7 @@ class DocumentService:
                 raise KeyError(doc_id)
             kb_id = doc.kb_id
         idx = index_service.get(kb_id)
-        out = []
-        for c in sorted((c for c in idx.store.chunks.values() if c.doc_id == doc_id), key=lambda c: c.order):
-            out.append(c)
-        return [c.model_dump() for c in out]
+        return [c.model_dump() for c in idx.store.chunks_of_doc(doc_id)]
 
     # --- 重建整库 ---------------------------------------------------------------------
     def reindex_kb(self, kb_id: str) -> list[str]:

@@ -3,12 +3,16 @@
 索引建在 child 上（检索粒度），parent 只进块存储（阅读粒度）；实体定义从 parent 抽取。
 文档里的图片进 ImageIndex（图文向量 + 描述文本向量 + 描述 BM25），并挂到所在的 parent 块上。
 一个 Index = 一个目录（Web 应用中每个知识库一个目录）。
+
+规模：默认各部分常驻内存、保存时整份重写，适合万~十万级段落。千万级段落用 storage.chunk_store: sqlite
++ LanceDB 向量后端（jieba 全文索引替代内存 BM25），见 config.yaml 的 storage 段与 docs/SCALING.md。
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from collections import OrderedDict
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -19,6 +23,8 @@ from ..schemas import Chunk, DocMetadata
 from .aux_index import AuxIndex
 from .bm25_store import BM25Store
 from .doc_store import ChunkStore
+from .scope import ChunkScope
+from .sqlite_store import SqliteChunkStore, move_aside
 from .embeddings import BaseEmbedder, build_embedder
 from .table_store import TableData, TableStore, link_chunks
 from .vector_store import ChromaVectorStore, NumpyVectorStore, QdrantVectorStore
@@ -29,7 +35,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["Index", "BaseEmbedder", "build_embedder", "BM25Store", "ChunkStore", "NumpyVectorStore", "QdrantVectorStore", "ChromaVectorStore"]
+__all__ = ["Index", "BaseEmbedder", "build_embedder", "BM25Store", "ChunkScope", "ChunkStore", "SqliteChunkStore", "NumpyVectorStore", "QdrantVectorStore", "ChromaVectorStore"]
 
 
 AUX_NAMES = ("summary", "section", "sentence")
@@ -47,15 +53,16 @@ class Index:
         self.images = ImageIndex(self.directory, embedder_factory=self._image_embedder, text_embedder=self.embedder, sparse_cfg=settings.sparse, lance_cfg=self._aux_lance().get("lance_cfg"))
         self.vectors = self._make_vector_store()
         self._tune_vectors()
-        self.bm25 = BM25Store(settings.sparse)
+        self.bm25 = self._make_keyword_index()
         # 辅助索引：摘要 / 章节级 / 句子级（入库时开了对应开关才会有内容）
         dim = self.embedder.dim or settings.embedding.dim
         self.aux: dict[str, AuxIndex] = {name: AuxIndex(name, dim, settings.sparse, **self._aux_lance()) for name in AUX_NAMES}
-        self.store = ChunkStore()
+        self.store = self._make_chunk_store()
         self.entities = EntityStore()
         self.tables = TableStore()
         self.entity_extractor = LLMEntityExtractor(llm) if (llm is not None and settings.retrieval.graph.llm_extraction) else None
         self.aliases = None              # corpus.AliasDict：BM25 查询扩展（Web 应用按知识库注入）
+        self.scope_cache: OrderedDict = OrderedDict()   # 检索范围按过滤条件缓存（retriever._doc_pass），文档变动时按 generation 失效
 
     def _aux_lance(self) -> dict:
         """向量后端是 LanceDB 时，摘要 / 章节 / 句子辅助索引也各建一张 LanceDB 表（同一个库）。"""
@@ -87,7 +94,29 @@ class Index:
         s = self.settings.vector_store.search
         configure = getattr(self.vectors, "configure", None)
         if callable(configure):
-            configure(pca_dim=s.pca_dim, quantize=s.quantize, rescore=s.rescore, oversample=s.oversample, ef_search=s.ef_search, nprobes=s.nprobes, refine_factor=s.refine_factor)
+            configure(pca_dim=s.pca_dim, quantize=s.quantize, rescore=s.rescore, oversample=s.oversample, ef_search=s.ef_search, nprobes=s.nprobes, refine_factor=s.refine_factor, nprobes_ratio=s.nprobes_ratio)
+
+    def _make_chunk_store(self):
+        st = self.settings.storage
+        if st.chunk_store == "sqlite":
+            return SqliteChunkStore.load(self.directory, cache_size=st.chunk_cache)
+        return ChunkStore()
+
+    @property
+    def lance_keyword(self) -> bool:
+        """关键词路走 LanceDB 的 jieba 全文索引（千万级配置）：不再在内存里维护 BM25。"""
+        return (self.settings.retrieval.sparse_backend == "lancedb_fts" and self.settings.vector_store.backend == "lancedb"
+                and self.settings.vector_store.lancedb.fts_tokenizer == "jieba")
+
+    def _make_keyword_index(self):
+        if self.lance_keyword:
+            from ..lance.keyword import LanceKeywordIndex
+
+            return LanceKeywordIndex(self.vectors, self.settings.sparse)
+        if self.settings.vector_store.backend == "lancedb" and self.settings.vector_store.lancedb.fts_tokenizer == "jieba":
+            # tokens 列写入时要用分词器：关键词路暂时没切到全文索引，也得先把列写对
+            self.vectors.tokenizer = BM25Store(self.settings.sparse).tokenize
+        return BM25Store(self.settings.sparse)
 
     # ----------------------------------------------------------------------------------
     def add_document(self, doc_id: str, metadata: DocMetadata, chunks: list[Chunk], images: "list[ExtractedImage] | None" = None, tables: list[TableData] | None = None) -> None:
@@ -109,7 +138,8 @@ class Index:
             ids = [c.chunk_id for c in children]
             vecs = self.embedder.embed_documents(texts)
             if getattr(self.vectors, "stores_text", False):   # LanceDB：正文与向量同表，原生全文 / 混合检索直接可用
-                self.vectors.add(ids, vecs, texts=texts, doc_ids=[doc_id] * len(ids))
+                # 同一文档重新入库前已整篇删除（见开头），这些 id 都是新的：直接追加，不做按 id 的 upsert
+                self.vectors.add(ids, vecs, texts=texts, doc_ids=[doc_id] * len(ids), fresh=True)
             else:
                 self.vectors.add(ids, vecs)
             self.bm25.add(ids, texts)
@@ -142,14 +172,14 @@ class Index:
         summaries = [c for c in chunks if c.kind == "parent" and c.summary]
         if summaries:
             texts = [(f"[来源：{c.breadcrumb_text}]\n" if c.breadcrumbs else "") + c.summary for c in summaries]
-            self.aux["summary"].add([c.chunk_id for c in summaries], texts, self.embedder.embed_documents(texts))
+            self.aux["summary"].add([c.chunk_id for c in summaries], texts, self.embedder.embed_documents(texts), doc_ids=[c.doc_id for c in summaries])
         for kind in ("section", "sentence"):
             units = [c for c in levels if c.kind == kind]
             if units:
                 # 章节级文本可能很长：只拿开头进向量（语义主旨），BM25 用全文
                 texts = [c.embed_text() for c in units]
                 vec_texts = [t[:1500] for t in texts] if kind == "section" else texts
-                self.aux[kind].add([c.chunk_id for c in units], texts, self.embedder.embed_documents(vec_texts))
+                self.aux[kind].add([c.chunk_id for c in units], texts, self.embedder.embed_documents(vec_texts), doc_ids=[c.doc_id for c in units])
 
     def remove_document(self, doc_id: str, *, keep_images: bool = False) -> None:
         if not keep_images:
@@ -162,29 +192,32 @@ class Index:
         removed_set = set(removed)
         for aux in self.aux.values():
             aux.remove(removed_set)
-        self.vectors.remove(removed)
-        new_bm25 = BM25Store(self.settings.sparse)
-        for cid, toks in zip(self.bm25.ids, self.bm25.corpus_tokens):
-            if cid not in removed_set:
-                new_bm25.ids.append(cid)
-                new_bm25.corpus_tokens.append(toks)
-        new_bm25._dirty = True
-        self.bm25 = new_bm25
+        remove_doc = getattr(self.vectors, "remove_doc", None)
+        if callable(remove_doc):
+            remove_doc(doc_id)            # LanceDB：按 doc_id 一条语句删
+        else:
+            self.vectors.remove(removed)
+        self.bm25.remove(removed_set)
         self.entities.remove_document(doc_id)
         self.images.chunk_clip.remove(removed)
 
     def remove_chunks(self, parent_ids: set[str]) -> list[str]:
         """语料治理：把若干 parent 连同其 child / 句子级单元移出检索（向量、BM25、辅助索引、块存储）。"""
         ids = set()
+        docs = set()
         for pid in parent_ids:
             p = self.store.get(pid)
             if p is None:
                 continue
             ids.add(pid)
             ids.update(p.child_ids)
-        ids.update(c.chunk_id for c in self.store.chunks.values() if c.parent_id in ids)
-        # 章节级单元（多粒度索引）通过 child_ids 引用 parent，正文里含被剔除段落：一并移出，重新解析时按剔除后的段落重建
-        ids.update(c.chunk_id for c in self.store.chunks.values() if c.kind == "section" and ids.intersection(c.child_ids))
+            docs.add(p.doc_id)
+        # 只看涉及的文档（不遍历全库）：句子级单元挂在 parent 下；章节级单元通过 child_ids 引用 parent，
+        # 正文里含被剔除段落，一并移出，重新解析时按剔除后的段落重建
+        for doc_id in docs:
+            for c in self.store.chunks_of_doc(doc_id):
+                if c.parent_id in ids or (c.kind == "section" and ids.intersection(c.child_ids)):
+                    ids.add(c.chunk_id)
         removed = self.store.remove_chunks(ids)
         if not removed:
             return []
@@ -209,15 +242,20 @@ class Index:
         directory.mkdir(parents=True, exist_ok=True)
         self.vectors.save(directory)
         self.bm25.save(directory)
+        stale_bm25 = directory / "bm25_corpus.jsonl"
+        if self.lance_keyword and stale_bm25.exists():
+            stale_bm25.rename(stale_bm25.with_name("bm25_corpus.jsonl.old"))   # 关键词路已切到全文索引：旧语料不再更新，留着切回时会读到过期数据
         self.store.save(directory)
+        if isinstance(self.store, ChunkStore):
+            move_aside(directory)          # 内存版：旧的 chunks.sqlite（切换前留下的）改名留底，免得以后切回 SQLite 读到过期数据
         self.entities.save(directory)
         self.images.save(directory)
         self.tables.save(directory)
         for aux in self.aux.values():
             aux.save(directory)
-        children = sum(1 for c in self.store.chunks.values() if c.kind == "child")
-        parents = sum(1 for c in self.store.chunks.values() if c.kind == "parent")
-        meta = {**self.signature(), "chunks": len(self.store), "children": children, "parents": parents, **{f"aux_{k}": len(v) for k, v in self.aux.items()}, "aux_store": {k: v.backend for k, v in self.aux.items()}, "docs": len(self.store.docs), "entities": len(self.entities), "images": len(self.images)}
+        kinds = self.store.count_by_kind()
+        children, parents = kinds.get("child", 0), kinds.get("parent", 0)
+        meta = {**self.signature(), "chunk_store": self.store.backend, "chunks": len(self.store), "children": children, "parents": parents, **{f"aux_{k}": len(v) for k, v in self.aux.items()}, "aux_store": {k: v.backend for k, v in self.aux.items()}, "docs": len(self.store.docs), "entities": len(self.entities), "images": len(self.images)}
         (directory / "index_meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         if self.settings.multimodal.lance_table:
             self._sync_lance_mm(directory)
@@ -263,18 +301,39 @@ class Index:
         dim = idx.embedder.dim or settings.embedding.dim
         lance_cfg = settings.vector_store.lancedb if settings.vector_store.backend == "lancedb" else None
         idx.aux = {name: AuxIndex.load(name, directory, dim, settings.sparse, lance_cfg=lance_cfg) for name in AUX_NAMES}
-        idx.bm25 = BM25Store.load(directory, settings.sparse)
-        idx.store = ChunkStore.load(directory)
+        if not isinstance(idx.store, SqliteChunkStore):        # SQLite 版在构造时已经打开（必要时从 jsonl 导入）
+            idx.store = cls._load_chunk_store(settings, directory)
+        if not idx.lance_keyword:
+            idx.bm25 = BM25Store.load(directory, settings.sparse)
+            if not idx.bm25.ids and len(idx.store) and getattr(idx.vectors, "stores_text", False):
+                # 从千万级配置切回内存 BM25：语料不在 jsonl 里，从 LanceDB 的正文列重建一次
+                idx.bm25 = BM25Store.from_lance(idx.vectors, settings.sparse)
         idx.entities = EntityStore.load(directory)
         idx.tables = TableStore.load(directory)
         idx.images = ImageIndex.load(directory, embedder_factory=idx._image_embedder, text_embedder=idx.embedder, sparse_cfg=settings.sparse, lance_cfg=lance_cfg)
         return idx
 
+    @staticmethod
+    def _load_chunk_store(settings: Settings, directory: Path):
+        """按 storage.chunk_store 打开块存储；与磁盘上的形态不一致时自动迁移（不需要重新解析文档）。"""
+        sqlite_file = directory / "chunks.sqlite"
+        if settings.storage.chunk_store == "sqlite":
+            return SqliteChunkStore.load(directory, cache_size=settings.storage.chunk_cache)   # 只有 jsonl 时会一次性导入
+        if not (directory / "chunks.jsonl").exists() and sqlite_file.exists():
+            logger.info("段落存储从 SQLite 切回内存：%s", directory)
+            sq = SqliteChunkStore.load(directory)
+            mem = sq.export_to_memory()
+            sq.close()
+            mem.save(directory)
+            move_aside(directory)
+            return mem
+        return ChunkStore.load(directory)
+
     @classmethod
     def exists(cls, directory: Path) -> bool:
-        return (Path(directory) / "chunks.jsonl").exists()
+        return (Path(directory) / "chunks.jsonl").exists() or (Path(directory) / "chunks.sqlite").exists()
 
     def stats(self) -> dict:
-        parents = sum(1 for c in self.store.chunks.values() if c.kind == "parent")
-        children = sum(1 for c in self.store.chunks.values() if c.kind == "child")
-        return {"docs": len(self.store.docs), "parents": parents, "children": children, **{f"aux_{k}": len(v) for k, v in self.aux.items()}, "vectors": len(self.vectors), "bm25_docs": len(self.bm25.ids), "entities": len(self.entities), "tables": len(self.tables), **self.images.stats(), **self.signature()}
+        kinds = self.store.count_by_kind()
+        parents, children = kinds.get("parent", 0), kinds.get("child", 0)
+        return {"docs": len(self.store.docs), "parents": parents, "children": children, **{f"aux_{k}": len(v) for k, v in self.aux.items()}, "vectors": len(self.vectors), "bm25_docs": len(self.bm25), "entities": len(self.entities), "tables": len(self.tables), **self.images.stats(), **self.signature()}

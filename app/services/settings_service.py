@@ -13,7 +13,7 @@ from ..db import Repository, SessionLocal
 SETTING_KEY = "settings_overrides"
 
 # 允许前端覆盖的顶层段落（避免把路径类配置改坏）
-EDITABLE_SECTIONS = ("parsing", "cleaning", "chunking", "enrich", "corpus", "sparse", "vector_store", "retrieval", "multimodal", "generation", "memory", "recommend", "agents")
+EDITABLE_SECTIONS = ("parsing", "cleaning", "chunking", "enrich", "corpus", "sparse", "vector_store", "storage", "retrieval", "multimodal", "generation", "memory", "recommend", "agents")
 
 
 class SettingsService:

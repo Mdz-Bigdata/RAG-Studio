@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 
 from typing import Any
 
 from prism.retrieval import AgenticRAG, HybridRetriever, KBDescriptor, KBRouter, MultiHopRetriever
 from prism.schemas import Context, RetrievalResult, ScoredChunk
 
-from ..db import Repository, SessionLocal
+from ..db import Document, Repository, SessionLocal
 from .index_service import index_service
 from .model_service import model_service
 from .settings_service import settings_service
@@ -56,7 +57,9 @@ class RetrievalService:
     # --- 序列化为前端结构 -------------------------------------------------------------
     def to_response(self, kb_id: str, result: RetrievalResult) -> dict[str, Any]:
         index = index_service.get(kb_id)
-        names = self.doc_names(kb_id)
+        tr = result.trace
+        shown = [x for v in tr.routes.values() for x in v[:20]] + tr.fused[:50] + tr.reranked + tr.diversified
+        names = self.doc_names(kb_id, {index.store.doc_of(x.chunk_id) for x in shown} | {c.chunk.doc_id for c in result.contexts})
 
         def item(sc: ScoredChunk) -> dict[str, Any]:
             c = index.store.get(sc.chunk_id)
@@ -74,7 +77,6 @@ class RetrievalService:
                 "matchedChildIds": cx.matched_child_ids, "weaved": cx.weaved, "weavedEntity": cx.weaved_entity,
             }
 
-        tr = result.trace
         return {
             "query": result.query,
             "strategy": tr.strategy,
@@ -94,9 +96,18 @@ class RetrievalService:
             "funnel": {"recall": sum(len(v) for v in tr.routes.values()), "fused": len(tr.fused), "reranked": len(tr.reranked), "contexts": len(result.contexts)},
         }
 
-    def doc_names(self, kb_id: str) -> dict[str, str]:
+    def doc_names(self, kb_id: str, doc_ids: Iterable[str | None] | None = None) -> dict[str, str]:
+        """文档 id → 文件名。只读这两列（不把正文等大字段整行读出来）；给了 doc_ids 就只查这些——
+        检索 / 问答每次都要调用，知识库有几十万篇文档时不能每次把全部文档行搬一遍。"""
         with SessionLocal() as db:
-            return {d.id: d.file_name for d in Repository(db).list_documents(kb_id)}
+            q = db.query(Document.id, Document.file_name).filter(Document.kb_id == kb_id)
+            if doc_ids is None:
+                return dict(q.all())
+            ids = sorted({d for d in doc_ids if d})
+            out: dict[str, str] = {}
+            for i in range(0, len(ids), 900):
+                out.update(q.filter(Document.id.in_(ids[i:i + 900])).all())
+            return out
 
     # --- 跨库路由 -------------------------------------------------------------------
     def route(self, query: str, *, top_n: int = 1, mode: str = "embedding", kb_ids: list[str] | None = None) -> list[dict[str, Any]]:

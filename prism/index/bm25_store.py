@@ -63,6 +63,19 @@ class BM25Store:
         toks = [t for t in base if t and t not in _STOP and not _is_punct(t)]
         return toks + precise
 
+    def __len__(self) -> int:
+        return len(self.ids)
+
+    @classmethod
+    def from_lance(cls, vectors, cfg: SparseConfig) -> "BM25Store":
+        """从 LanceDB children 表的正文列重建（千万级配置切回内存 BM25 时用）。"""
+        store = cls(cfg)
+        tbl = vectors._table()
+        if tbl is not None:
+            for batch in tbl.search().select(["id", "text"]).limit(None).to_batches(8192):   # 流式读，不依赖 pylance
+                store.add(batch.column("id").to_pylist(), [t or "" for t in batch.column("text").to_pylist()])
+        return store
+
     def add(self, ids: list[str], texts: list[str]) -> None:
         for cid, text in zip(ids, texts):
             self.ids.append(cid)

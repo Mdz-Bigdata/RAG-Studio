@@ -101,8 +101,8 @@ class CorpusService:
             for doc_id in doc_ids:
                 d = repo.get_document(doc_id)
                 if d is not None:
-                    chunks = [c for c in idx.store.chunks.values() if c.doc_id == doc_id]
-                    repo.update_document(d, chunk_count=sum(1 for c in chunks if c.kind == "child"), parent_count=sum(1 for c in chunks if c.kind == "parent"))
+                    kinds = idx.store.count_doc(doc_id)
+                    repo.update_document(d, chunk_count=kinds.get("child", 0), parent_count=kinds.get("parent", 0))
 
     def _refresh_index_meta(self, kb_id: str, doc_ids: list[str]) -> None:
         """元数据改了只需要更新索引里的 DocMetadata（过滤用），不必重新向量化。"""
@@ -117,6 +117,7 @@ class CorpusService:
                     continue
                 for key in ("title", "version", "valid_from", "valid_to", "department", "tags", "access_level", "allowed_departments"):
                     setattr(cur, key, getattr(md, key))
+                idx.store.touch_doc(doc_id)        # 检索范围缓存失效；SQLite 块存储在 save 时写回
             index_service.save(kb_id, idx)
 
     # --- 质量体检 ------------------------------------------------------------------------

@@ -139,6 +139,12 @@ class IngestPipeline:
             # 用这份文档的图片（沿用索引里的，或刚重新抽取的）再回填一次，否则扫描页的文字会从文本检索里消失。
             records = images if images is not None else self.index.images.of_document(doc.doc_id)
             self._backfill_scanned_pages(doc, records, page_text_known=False)
+        doc, chunks, tables = self.chunk_document(doc)
+        self.index.add_document(doc.doc_id, doc.metadata, chunks, images=images, tables=tables)
+        return chunks
+
+    def chunk_document(self, doc: ParsedDocument) -> tuple[ParsedDocument, list[Chunk], list]:
+        """清洗 → 切片 → 增强 → 文档扩展（不写索引）。批量导入（ingest/bulk.py）也走这一步，切出来的段落与逐个上传完全一致。"""
         doc = clean_document(doc, self.settings.cleaning)
         tables = tables_from_blocks(doc.doc_id, doc.blocks)   # Excel / CSV 的行 → SQL 检索路
         chunks = self._drop_excluded(self.chunker.chunk(doc))
@@ -146,8 +152,7 @@ class IngestPipeline:
         self._expand_chunks(doc, chunks)
         # Content List 体积大，不进索引元数据
         doc.metadata.extra.pop("mineru_content_list", None)
-        self.index.add_document(doc.doc_id, doc.metadata, chunks, images=images, tables=tables)
-        return chunks
+        return doc, chunks, tables
 
     def _drop_excluded(self, chunks: list[Chunk]) -> list[Chunk]:
         """语料治理里剔除过的段落连同其 child 一起不入库。按「文档 + 内容指纹」匹配：只剔除被选中的那一份，

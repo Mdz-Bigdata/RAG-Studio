@@ -44,12 +44,13 @@ class AuxIndex:
     def prefix(self) -> str:
         return f"{self.name}_"
 
-    def add(self, ids: list[str], texts: list[str], vectors: np.ndarray) -> None:
-        """texts 进全文（BM25 / FTS），vectors 可以由截短的文本算出（章节级只拿开头算向量）。"""
+    def add(self, ids: list[str], texts: list[str], vectors: np.ndarray, doc_ids: list[str] | None = None) -> None:
+        """texts 进全文（BM25 / FTS），vectors 可以由截短的文本算出（章节级只拿开头算向量）。
+        doc_ids：LanceDB 表按它做文档级过滤下推（ChunkScope）。"""
         if not ids:
             return
         if self.lance is not None:
-            self.lance.add(ids, vectors, texts=texts)
+            self.lance.add(ids, vectors, texts=texts, doc_ids=doc_ids)
             return
         self.vectors.add(ids, vectors)
         self.bm25.add(ids, texts)

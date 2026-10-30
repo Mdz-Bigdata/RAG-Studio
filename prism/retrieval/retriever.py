@@ -33,6 +33,7 @@ from ..config import RetrievalConfig, Settings
 from ..generation.llm import BaseLLM
 from ..graph.unweaver import weave_contexts
 from ..index import Index
+from ..index.scope import ChunkScope
 from ..ingest.chunking.tokenizer import count_tokens
 from ..schemas import Chunk, Context, DocMetadata, RetrievalResult, RetrievalTrace, ScoredChunk
 from .compress import LLMCompressor, compress_rule
@@ -50,6 +51,9 @@ logger = logging.getLogger(__name__)
 # 判定无答案时，精排分 ≥ min_score × 该比例的候选才算"相近主题"、可以拿来反问。示例库 + bge-reranker-v2-m3、min_score 0.1 实测：
 # 说得笼统的相关问题（"那个钱怎么报"）top-1 约 0.045；库外问题（"公司食堂几点开饭"）≤ 0.002，交给模型判断仍会硬列出"调休""年假"
 NEAR_MISS_RATIO = 0.2
+# 文档级的过滤条件：结果是一个 ChunkScope（按文档），不展开成段落 id。其余条件（version / source / title / sheet 这类
+# 段落 metadata）仍按段落逐个判断——全库遍历，只适合小库
+_DOC_LEVEL_FILTERS = {"user", "doc_id", "year", "file_format", "department", "tags"}
 
 
 class HybridRetriever:
@@ -86,14 +90,14 @@ class HybridRetriever:
         include_expired = False
         if cfg.filter_expired and cfg.history_intent:
             docs = self.index.store.docs.values()
-            hit = history_intent(query, docs, on_date) if any(not md.is_effective(on_date) for md in docs) else None
+            hit = history_intent(query, docs, on_date) if self._has_expired(on_date) else None
             if hit:
                 include_expired = True
                 trace.notes.append(f"时效：问题在问历史规定（“{hit}”），本次检索包含已失效的文档，资料中会标注失效")
         allowed = self._allowed_ids(filters, on_date, cfg, include_expired=include_expired)
         user = (filters or {}).get("user") if cfg.access.enabled else None
         if user is not None:
-            hidden = sum(1 for md in self.index.store.docs.values() if not md.is_visible_to(user))
+            hidden = self._doc_pass(False, on_date, user, {})[1]
             if hidden:
                 trace.notes.append(f"权限过滤：当前身份（级别 {user.get('level', 0)}{' · ' + str(user['department']) if user.get('department') else ''}）无权查看 {hidden} 篇文档，已排除")
         if allowed is not None and not allowed:
@@ -212,11 +216,13 @@ class HybridRetriever:
         return RetrievalResult(query=query, contexts=contexts, trace=trace)
 
     # ----------------------------------------------------------------------------------
-    def _scope_docs(self, allowed: set[str] | None) -> dict[str, DocMetadata]:
+    def _scope_docs(self, allowed: set[str] | ChunkScope | None) -> dict[str, DocMetadata]:
         """当前还在检索范围内的文档（已过时效 / 权限 / 显式过滤）。"""
         store = self.index.store
         if allowed is None:
             return dict(store.docs)
+        if isinstance(allowed, ChunkScope):
+            return {doc_id: md for doc_id, md in store.docs.items() if allowed.allows_doc(doc_id)}
         ids = {store.chunks[c].doc_id for c in allowed if c in store.chunks}
         return {doc_id: md for doc_id, md in store.docs.items() if doc_id in ids}
 
@@ -228,7 +234,7 @@ class HybridRetriever:
             return lambda: (auto_filter, "upstream", None)
         if auto_filter is False or mf.mode == "off":
             return lambda: ({}, "off", None)
-        available = facets(self._scope_docs(allowed).values())
+        available = self._facets(allowed)
         # 每个属性最多只有一种取值时没有可缩小的范围，不必识别
         if not any(len(available[f]) > 1 for f in mf.fields):
             return lambda: ({}, "none", None)
@@ -270,15 +276,22 @@ class HybridRetriever:
         info["applied"] = True
         trace.notes.append(f"元数据过滤（{label}）：{describe(conditions)} → 候选文档 {len(scope)} 篇缩小到 {len(keep)} 篇"
                            + ("（未填该属性的文档保留）" if cfg.metadata_filter.include_missing else ""))
+        if allowed is None or isinstance(allowed, ChunkScope):
+            return allowed.restrict(keep) if allowed is not None else self._new_scope(include=frozenset(keep))
         store = self.index.store
-        return {cid for cid in (allowed if allowed is not None else store.child_ids()) if store.chunks[cid].doc_id in keep}
+        return {cid for cid in allowed if store.chunks[cid].doc_id in keep}
 
     # ----------------------------------------------------------------------------------
-    def _allowed_ids(self, filters: dict[str, Any] | None, on_date: date | None, cfg: RetrievalConfig, *, include_expired: bool = False) -> set[str] | None:
+    def _allowed_ids(self, filters: dict[str, Any] | None, on_date: date | None, cfg: RetrievalConfig, *, include_expired: bool = False) -> set[str] | ChunkScope | None:
+        """检索范围。条件都是文档级的（时效 / 权限 / doc_id / 年份 / 部门 / 标签…，绝大多数情况）→ ChunkScope，
+        只遍历文档、按条件缓存，交给向量库 / 全文索引下推；带段落级条件时才逐段落判断，返回段落 id 集合。"""
         need_effective = cfg.filter_expired and not include_expired
         if not filters and not need_effective:
             return None
         user = (filters or {}).get("user") if cfg.access.enabled else None
+        if not set(filters or {}) - _DOC_LEVEL_FILTERS:
+            explicit = {k: v for k, v in (filters or {}).items() if k != "user"}
+            return self._doc_pass(need_effective, on_date, user, explicit)[0]
 
         def pred(c: Chunk, md: DocMetadata | None) -> bool:
             if need_effective and md is not None and not md.is_effective(on_date):
@@ -308,6 +321,64 @@ class HybridRetriever:
 
         return self.index.store.filter_child_ids(pred)
 
+    # --- 文档级检索范围（按条件缓存，文档增删 / 元数据改动时失效）-----------------------------
+    def _new_scope(self, *, include: frozenset[str] | None = None, exclude: frozenset[str] = frozenset()) -> ChunkScope:
+        store = self.index.store
+        return ChunkScope(include=include, exclude=exclude, doc_of=store.doc_of, expand=store.scope_chunk_ids)
+
+    def _doc_pass(self, need_effective: bool, on_date: date | None, user: dict[str, Any] | None, explicit: dict[str, Any]) -> tuple[ChunkScope, int]:
+        """遍历一遍文档元数据：(检索范围, 因权限被排除的文档数)。"""
+        store = self.index.store
+        # on_date=None 表示"今天"：键里用实际日期，否则缓存会跨过零点，当天到期的文档还被当成有效
+        key = ("scope", store.generation, len(store.docs), need_effective, on_date or date.today(), _freeze(user), _freeze(explicit))
+        hit = self.index.scope_cache.get(key)
+        if hit is not None:
+            self.index.scope_cache.move_to_end(key)
+            return hit
+        keep: list[str] = []
+        hidden = 0
+        for doc_id, md in store.docs.items():
+            if need_effective and not md.is_effective(on_date):
+                continue
+            if user is not None and not md.is_visible_to(user):
+                hidden += 1
+                continue
+            if explicit and not _doc_matches(doc_id, md, explicit):
+                continue
+            keep.append(doc_id)
+        scope = ChunkScope.of_docs(keep, store.docs.keys(), doc_of=store.doc_of, expand=store.scope_chunk_ids)
+        if explicit:   # 显式条件按字面执行：不认识的文档（没有元数据）不算匹配，只能用"允许列表"表示
+            scope = self._new_scope(include=frozenset(keep))
+        self._remember(key, (scope, hidden))
+        return scope, hidden
+
+    def _facets(self, allowed: set[str] | ChunkScope | None) -> dict[str, Any]:
+        """范围内文档的各属性取值（自查询要在这些取值里挑条件）。每次查询都要用、要遍历文档：按范围缓存。"""
+        if allowed is not None and not isinstance(allowed, ChunkScope):
+            return facets(self._scope_docs(allowed).values())
+        store = self.index.store
+        key = ("facets", store.generation, len(store.docs), None if allowed is None else (allowed.include, allowed.exclude))
+        hit = self.index.scope_cache.get(key)
+        if hit is None:
+            hit = facets(self._scope_docs(allowed).values())
+            self._remember(key, hit)
+        return hit
+
+    def _has_expired(self, on_date: date | None) -> bool:
+        store = self.index.store
+        key = ("expired", store.generation, len(store.docs), on_date or date.today())
+        hit = self.index.scope_cache.get(key)
+        if hit is None:
+            hit = any(not md.is_effective(on_date) for md in store.docs.values())
+            self._remember(key, hit)
+        return hit
+
+    def _remember(self, key: tuple, value: Any) -> None:
+        cache = self.index.scope_cache
+        cache[key] = value
+        while len(cache) > self.index.settings.storage.scope_cache:
+            cache.popitem(last=False)
+
     def facets(self, filters: dict[str, Any] | None = None, on_date: date | None = None) -> dict[str, Any]:
         """当前身份能检索到的文档里，各元数据属性有哪些取值、各几篇：给界面的过滤选项用。"""
         scope = self._scope_docs(self._allowed_ids({"user": (filters or {}).get("user")} if (filters or {}).get("user") else None, on_date, self.cfg))
@@ -324,10 +395,12 @@ class HybridRetriever:
             return None
         return {doc_id for doc_id, md in docs.items() if (expired_ok or md.is_effective(on_date)) and (user is None or md.is_visible_to(user))}
 
-    def _weave_allow(self, allowed: set[str] | None):
+    def _weave_allow(self, allowed: set[str] | ChunkScope | None):
         """织入块（parent）是否通过了本次检索的元数据过滤：allowed 是 child id，换算成它们所属的 parent。"""
         if allowed is None:
             return None
+        if isinstance(allowed, ChunkScope):
+            return lambda chunk: allowed.allows_doc(chunk.doc_id)
         store = self.index.store
         parents = {store.chunks[c].parent_id or c for c in allowed if c in store.chunks}
         return lambda chunk: chunk.chunk_id in allowed or chunk.chunk_id in parents
@@ -499,10 +572,10 @@ class HybridRetriever:
                 break
         return out
 
-    def _aux_allowed(self, allowed: set[str] | None) -> dict[str, set[str] | None]:
-        """主过滤结果是 child id；换算成摘要（parent id）/ 句子 / 章节单元各自可见的 id。"""
-        if allowed is None:
-            return {"summary": None, "section": None, "sentence": None}
+    def _aux_allowed(self, allowed: set[str] | ChunkScope | None) -> dict[str, set[str] | ChunkScope | None]:
+        """主过滤结果是 child id；换算成摘要（parent id）/ 句子 / 章节单元各自可见的 id。文档级范围对各级单元同样适用。"""
+        if allowed is None or isinstance(allowed, ChunkScope):
+            return {"summary": allowed, "section": allowed, "sentence": allowed}
         store = self.index.store
         parents = {store.chunks[c].parent_id for c in allowed if c in store.chunks}
         out: dict[str, set[str] | None] = {"summary": set(parents), "section": set(), "sentence": set()}
@@ -573,6 +646,26 @@ def _take_top(contexts, top_k: int, order: str):
 
 def _fmt(score: float | None) -> str:
     return "无" if score is None else f"{score:.3f}"
+
+
+def _doc_matches(doc_id: str, md: DocMetadata, explicit: dict[str, Any]) -> bool:
+    """显式过滤条件（文档级的那几种）是否满足：与段落级判断的语义一致——按字面执行，没填该属性的不算匹配。"""
+    for key, want in explicit.items():
+        if key == "doc_id":
+            if doc_id not in _as_list(want):
+                return False
+        elif not matches(md, {key: _as_list(want)}, include_missing=False):
+            return False
+    return True
+
+
+def _freeze(v: Any) -> Any:
+    """条件 → 可哈希的缓存键。"""
+    if isinstance(v, dict):
+        return tuple(sorted((k, _freeze(x)) for k, x in v.items()))
+    if isinstance(v, (list, tuple, set, frozenset)):
+        return tuple(sorted(map(repr, v)))
+    return v
 
 
 def _as_list(v: Any) -> list[Any]:

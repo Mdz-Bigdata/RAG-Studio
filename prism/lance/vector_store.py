@@ -5,14 +5,22 @@
 - 读：行数不到 index_min_rows 时精确扫描（召回 100%）；够了自动建 ANN 索引（默认 IVF_HNSW_SQ），
   查询期的 nprobes / refine_factor / ef 在 vector_store.search 里调；
 - allowed_ids（权限 / 元数据过滤）走 SQL 预过滤：先过滤再算距离，不会被不可见的块挤掉名额；
+  传进来的是 ChunkScope（文档级范围，千万级知识库用）时直接下推成 doc_id IN / NOT IN，不展开成段落 id；
+- IVF 分区数随数据量定（√行数 / 4），查询时至少探查 nprobes_ratio 比例的分区——固定 nprobes 在大库上召回会悄悄变差；
+  数据量涨到建索引时的 4 倍就重训索引（分区中心是按当时的数据训练的）；
+- fts_tokenizer: jieba 时，写入时用 BM25 同一套 jieba 分词把正文切好存进 tokens 列，全文索引建在 tokens 上（whitespace），
+  千万级知识库用它替代内存里的 BM25；
 - 原生全文检索（ICU 分词，中文可用、无需下载模型）与混合检索（向量 + 全文 + RRF），
   可以替换关键词路（retrieval.sparse_backend: lancedb_fts），也在 LanceDB 控制台里直接对比。
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import math
 import threading
+from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -20,8 +28,9 @@ from typing import Any
 import numpy as np
 
 from ..config import LanceDBConfig
+from ..index.scope import ChunkScope, doc_prefix
 from ..index.vector_store import widen_until_filled
-from .db import connect, has_index, open_table, sql_in, table_info, version_list, write_lock
+from .db import connect, has_index, open_table, sql_in, sql_str, table_info, version_list, write_lock
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +61,11 @@ class LanceDBVectorStore:
         self._lock = threading.RLock()
         # 查询期参数（configure 设置，来自 vector_store.search）
         self.nprobes = 20
+        self.nprobes_ratio = 0.3
         self.refine_factor: int | None = 5
         self.ef = 128
+        self.tokenizer: Callable[[str], list[str]] | None = None   # fts_tokenizer: jieba 时由 Index 注入（与 BM25 同一套分词）
+        self._has_doc_ids: tuple[int, bool] | None = None
 
     # ----------------------------------------------------------------------------------
     @property
@@ -106,8 +118,30 @@ class LanceDBVectorStore:
                 self.db.drop_table(self.table_name)
             self._tbl, self._count, self._indexed, self._dim, self._snap = None, None, None, 0, None
 
-    def configure(self, *, ef_search: int = 128, nprobes: int = 20, refine_factor: int | None = 5, **_: object) -> None:
-        self.ef, self.nprobes, self.refine_factor = ef_search, nprobes, refine_factor
+    def configure(self, *, ef_search: int = 128, nprobes: int = 20, refine_factor: int | None = 5, nprobes_ratio: float = 0.3, **_: object) -> None:
+        self.ef, self.nprobes, self.refine_factor, self.nprobes_ratio = ef_search, nprobes, refine_factor, nprobes_ratio
+
+    # --- ANN 索引的元信息（分区数 / 建索引时的行数）----------------------------------------
+    @property
+    def _ann_meta_path(self) -> Path:
+        return self.directory / f"{self.table_name}.ann.json"
+
+    def _ann_meta(self) -> dict[str, Any]:
+        try:
+            return json.loads(self._ann_meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def _probes(self) -> int:
+        """查询探查的分区数：配置的 nprobes 与"分区数 × nprobes_ratio"取大者。老索引没有记分区数时按 Lance 的默认（√行数）估。"""
+        parts = self._ann_meta().get("partitions") or max(1, int(math.sqrt(max(1, len(self)))))
+        return max(self.nprobes, math.ceil(parts * self.nprobes_ratio))
+
+    @staticmethod
+    def partitions_for(rows: int, index_type: str) -> int:
+        """IVF 分区数：IVF_HNSW_SQ 分区内还有 HNSW 图，分区可以大一些（√n / 4）；IVF_PQ / IVF_FLAT 用 √n。"""
+        root = math.sqrt(max(1, rows))
+        return max(1, int(root / 4) if "HNSW" in index_type else int(root))
 
     @property
     def indexed(self) -> bool:
@@ -122,19 +156,40 @@ class LanceDBVectorStore:
         return self.indexed
 
     # ----------------------------------------------------------------------------------
-    def add(self, ids: list[str], vectors: np.ndarray, *, texts: list[str] | None = None, doc_ids: list[str] | None = None) -> None:
+    @property
+    def jieba_fts(self) -> bool:
+        return self.cfg.fts_tokenizer == "jieba"
+
+    @property
+    def fts_column(self) -> str:
+        return "tokens" if self.jieba_fts else "text"
+
+    def _tokens(self, text: str) -> str:
+        if self.tokenizer is None:
+            raise RuntimeError("fts_tokenizer: jieba 需要先注入分词器（Index 会自动注入）")
+        return " ".join(self.tokenizer(text))
+
+    def add(self, ids: list[str], vectors: np.ndarray, *, texts: list[str] | None = None, doc_ids: list[str] | None = None, fresh: bool = False,
+            tokens: list[str] | None = None) -> None:
+        """fresh=True：调用方保证这些 id 都是新的（同一文档重新入库前已整篇删除）——直接追加，不做按 id 的 upsert。
+        merge_insert 要拿新数据和整张表按 id 做连接，千万行时每传一个文档要好几秒；追加是常数时间。
+        tokens：已经切好、空格连接的分词结果（批量导入在多进程里分词后传进来）；不给则按 tokenizer 现切。"""
         if not ids:
             return
         import pyarrow as pa
 
         vecs = np.asarray(vectors, dtype=np.float32)
         n = len(ids)
-        data = pa.table({
+        cols = {
             "id": pa.array(ids, type=pa.string()),
-            "doc_id": pa.array(doc_ids or [""] * n, type=pa.string()),
+            # 文档级过滤（ChunkScope）按 doc_id 下推：调用方没给就从段落 id 的前缀取
+            "doc_id": pa.array(doc_ids or [doc_prefix(i) for i in ids], type=pa.string()),
             "text": pa.array(texts or [""] * n, type=pa.string()),
-            "vector": _vector_column(vecs),
-        })
+        }
+        if self.jieba_fts:
+            cols["tokens"] = pa.array(tokens if tokens is not None else [self._tokens(t) for t in (texts or [""] * n)], type=pa.string())
+        cols["vector"] = _vector_column(vecs)
+        data = pa.table(cols)
         with write_lock(self.directory, self.table_name):
             tbl = self._table()
             if tbl is None:
@@ -143,7 +198,28 @@ class LanceDBVectorStore:
             else:
                 if vecs.shape[1] != self._dim:
                     raise ValueError(f"向量维度不匹配：{vecs.shape[1]} != {self._dim}（换了向量模型需要重建索引）")
-                tbl.merge_insert("id").when_matched_update_all().when_not_matched_insert_all().execute(data)
+                if fresh:
+                    tbl.add(data)
+                else:
+                    tbl.merge_insert("id").when_matched_update_all().when_not_matched_insert_all().execute(data)
+            self._after_write()
+
+    def remove_doc(self, doc_id: str) -> None:
+        """整篇删除：按 doc_id 一条语句删掉（不用先列出全部段落 id）。"""
+        tbl = self._table()
+        if tbl is None:
+            return
+        with write_lock(self.directory, self.table_name):
+            tbl.delete(f"doc_id = {sql_str(doc_id)}")
+            self._after_write()
+
+    def remove_docs(self, doc_ids: list[str]) -> None:
+        tbl = self._table()
+        if tbl is None or not doc_ids:
+            return
+        with write_lock(self.directory, self.table_name):
+            for i in range(0, len(doc_ids), _BATCH):
+                tbl.delete(sql_in("doc_id", doc_ids[i:i + _BATCH]))
             self._after_write()
 
     def remove(self, ids: list[str]) -> None:
@@ -175,30 +251,56 @@ class LanceDBVectorStore:
         return out
 
     # ----------------------------------------------------------------------------------
+    def _doc_ids_complete(self) -> bool:
+        """表里每行都有 doc_id 才能按文档下推（早期写入的辅助索引表没有填 doc_id）。按表版本缓存。"""
+        tbl = self._table()
+        if tbl is None:
+            return True
+        if self._has_doc_ids is None or self._has_doc_ids[0] != tbl.version:
+            self._has_doc_ids = (tbl.version, tbl.count_rows("doc_id = '' OR doc_id IS NULL") == 0)
+        return self._has_doc_ids[1]
+
+    def _filter(self, allowed_ids) -> tuple[str | None, object | None]:
+        """(预过滤 SQL, 后置过滤用的集合)。两者都是 None = 不过滤。"""
+        if allowed_ids is None:
+            return None, None
+        if isinstance(allowed_ids, ChunkScope):
+            if allowed_ids.unrestricted:
+                return None, None
+            # 排除模式意味着至少一半文档可见（ChunkScope.of_docs 取小的那份）：多取一些再按 doc 过滤（O(1)）比每次让
+            # LanceDB 解析一条几千项的 NOT IN 更快——百万段落、排除 7500 篇时 32 ms → 13 ms。允许列表才值得下推
+            if allowed_ids.include is not None and allowed_ids.pushable and self._doc_ids_complete():
+                return allowed_ids.sql("doc_id"), None
+            return None, allowed_ids
+        if len(allowed_ids) > _IN_LIMIT:
+            return None, allowed_ids
+        return sql_in("id", allowed_ids), None
+
     def search(self, query: np.ndarray, top_n: int, allowed_ids: set[str] | None = None, *, exact: bool = False) -> list[tuple[str, float]]:
         """余弦相似度降序（与 numpy 后端同一尺度：归一化向量的内积）。"""
         tbl = self._table()
         if tbl is None or top_n <= 0 or (allowed_ids is not None and not allowed_ids):
             return []
         q = np.asarray(query, dtype=np.float32).reshape(-1)
-        post = allowed_ids is not None and len(allowed_ids) > _IN_LIMIT
+        where, post = self._filter(allowed_ids)
 
         def fetch(limit: int) -> list[tuple[str, float]]:
             b = tbl.search(q, vector_column_name="vector").distance_type("cosine").select(["id", "_distance"]).limit(limit)
-            if allowed_ids is not None and not post:
-                b = b.where(sql_in("id", allowed_ids), prefilter=True)
+            if where:
+                b = b.where(where, prefilter=True)
             if exact:
                 b = b.bypass_vector_index()
             elif self.indexed:
-                b = b.nprobes(self.nprobes)
+                b = b.nprobes(self._probes())
                 if self.refine_factor:
                     b = b.refine_factor(self.refine_factor)
                 if "HNSW" in (self.cfg.index_type if self.cfg.index_type != "auto" else "IVF_HNSW_SQ"):
-                    b = b.ef(self.ef)
+                    # HNSW 要求 ef ≥ 实际取回数（refine 时是 limit × refine_factor），否则 Lance 直接报错
+                    b = b.ef(max(self.ef, limit * (self.refine_factor or 1)))
             t = b.to_arrow()
             return [(cid, 1.0 - float(d)) for cid, d in zip(t.column("id").to_pylist(), t.column("_distance").to_pylist())]
 
-        return widen_until_filled(fetch, top_n, len(self), allowed_ids) if post else fetch(top_n)
+        return widen_until_filled(fetch, top_n, len(self), post) if post is not None else fetch(top_n)
 
     def search_exact(self, query: np.ndarray, top_n: int, allowed_ids: set[str] | None = None) -> list[tuple[str, float]]:
         return self.search(query, top_n, allowed_ids, exact=True)
@@ -209,19 +311,24 @@ class LanceDBVectorStore:
         if tbl is None or not text.strip() or (allowed_ids is not None and not allowed_ids):
             return []
         self.ensure_fts()
-        post = allowed_ids is not None and len(allowed_ids) > _IN_LIMIT
-        b = tbl.search(text, query_type="fts", fts_columns="text").select(["id", "_score"]).limit(top_n * 4 if post else top_n)
-        if allowed_ids is not None and not post:
-            b = b.where(sql_in("id", allowed_ids), prefilter=True)
-        try:
+        if self.jieba_fts:
+            text = self._tokens(text)
+            if not text:
+                return []
+        where, post = self._filter(allowed_ids)
+
+        def fetch(limit: int) -> list[tuple[str, float]]:
+            b = tbl.search(text, query_type="fts", fts_columns=self.fts_column).select(["id", "_score"]).limit(limit)
+            if where:
+                b = b.where(where, prefilter=True)
             t = b.to_arrow()
+            return [(cid, float(s)) for cid, s in zip(t.column("id").to_pylist(), t.column("_score").to_pylist())]
+
+        try:
+            return widen_until_filled(fetch, top_n, len(self), post) if post is not None else fetch(top_n)
         except Exception as exc:   # 查询里有全文检索语法字符等
             logger.info("LanceDB 全文检索失败（%s），本次关键词路为空", exc)
             return []
-        hits = [(cid, float(s)) for cid, s in zip(t.column("id").to_pylist(), t.column("_score").to_pylist())]
-        if post:
-            hits = [h for h in hits if h[0] in allowed_ids]
-        return hits[:top_n]
 
     def hybrid_search(self, query: np.ndarray, text: str, top_n: int, allowed_ids: set[str] | None = None, *, reranker: str = "rrf") -> list[tuple[str, float]]:
         """LanceDB 原生混合检索：向量 + 全文，两路用 RRF（或线性加权）融合。"""
@@ -239,33 +346,42 @@ class LanceDBVectorStore:
         if not (text or "").strip():
             return vector_only()
         self.ensure_fts()
-        post = allowed_ids is not None and len(allowed_ids) > _IN_LIMIT
+        if self.jieba_fts:
+            text = self._tokens(text)
+            if not text:
+                return vector_only()
+        where, post = self._filter(allowed_ids)
         rr = LinearCombinationReranker(weight=0.7) if reranker == "linear" else RRFReranker()
-        b = tbl.search(query_type="hybrid").vector(q).text(text).distance_type("cosine").rerank(rr).select(["id"]).limit(top_n * 4 if post else top_n)
-        if allowed_ids is not None and not post:
-            b = b.where(sql_in("id", allowed_ids), prefilter=True)
+        b = tbl.search(query_type="hybrid", fts_columns=self.fts_column).vector(q).text(text).distance_type("cosine").rerank(rr).select(["id"]).limit(top_n * 4 if post is not None else top_n)
+        if where:
+            b = b.where(where, prefilter=True)
         try:
             t = b.to_arrow()
         except Exception as exc:
             logger.info("LanceDB 混合检索的全文部分失败（%s），本次只用向量", exc)
             return vector_only()
         hits = list(zip(t.column("id").to_pylist(), (float(x) for x in t.column("_relevance_score").to_pylist())))
-        if post:
-            hits = [h for h in hits if h[0] in allowed_ids]
+        if post is not None:
+            hits = [h for h in hits if h[0] in post]
         return hits[:top_n]
 
     # ----------------------------------------------------------------------------------
     def ensure_fts(self) -> None:
         tbl = self._table()
-        if tbl is None or has_index(tbl, "text"):
+        col = self.fts_column
+        if tbl is None or has_index(tbl, col):
             return
         with write_lock(self.directory, self.table_name):
-            if has_index(tbl, "text"):
+            if has_index(tbl, col):
                 return
-            kw: dict[str, Any] = {"base_tokenizer": self.cfg.fts_tokenizer, "stem": False, "remove_stop_words": False, "lower_case": True, "replace": True}
+            # jieba：正文写入时已经切好词、空格分隔，索引按空白切即可
+            base = "whitespace" if self.jieba_fts else self.cfg.fts_tokenizer
+            kw: dict[str, Any] = {"base_tokenizer": base, "stem": False, "remove_stop_words": False, "lower_case": True, "replace": True}
+            if self.jieba_fts:
+                kw.update(with_position=False, max_token_length=None)
             if self.cfg.fts_tokenizer == "ngram":
                 kw.update(ngram_min_length=2, ngram_max_length=2)
-            tbl.create_fts_index("text", **kw)
+            tbl.create_fts_index(col, **kw)
 
     def ensure_indexes(self) -> dict[str, Any]:
         """按数据量补齐索引：全文索引（有正文时）、id 的 BTREE（IN 预过滤）、够量时的 ANN 向量索引。"""
@@ -277,17 +393,34 @@ class LanceDBVectorStore:
         if rows:
             self.ensure_fts()
         with write_lock(self.directory, self.table_name):
-            if rows >= 2000 and not has_index(tbl, "id"):
-                tbl.create_scalar_index("id", index_type="BTREE")
-                done["id"] = "BTREE"
+            if rows >= 2000:
+                for col in ("id", "doc_id"):          # id：按 id 取向量 / 删除；doc_id：文档级预过滤与整篇删除
+                    if not has_index(tbl, col):
+                        tbl.create_scalar_index(col, index_type="BTREE")
+                        done[col] = "BTREE"
             kind = self.cfg.index_type
             want_ann = kind not in ("none",) and (kind != "auto" or rows >= self.cfg.index_min_rows)
-            if want_ann and rows >= 256 and not has_index(tbl, "vector"):
+            if want_ann and rows >= 256:
                 index_type = "IVF_HNSW_SQ" if kind == "auto" else kind
-                tbl.create_index(metric="cosine", vector_column_name="vector", index_type=index_type)
-                self._indexed = True
-                done["vector"] = index_type
+                built = self._ann_meta().get("rows") or 0
+                if not has_index(tbl, "vector"):
+                    done["vector"] = self._build_ann(index_type, rows)
+                elif built and rows >= 4 * built:
+                    # 分区中心是按建索引时的数据训练的：数据涨到 4 倍，新数据只能硬塞进老分区，召回和速度都变差
+                    logger.info("%s 行数 %d 已是建索引时（%d）的 4 倍以上，重训 ANN 索引", self.table_name, rows, built)
+                    done["vector"] = self._build_ann(index_type, rows)
         return done
+
+    def _build_ann(self, index_type: str, rows: int) -> str:
+        tbl = self._table()
+        parts = self.partitions_for(rows, index_type)
+        kw: dict[str, Any] = {"num_partitions": parts}
+        if index_type == "IVF_PQ":
+            kw["num_sub_vectors"] = max(1, self.dim // 16)
+        tbl.create_index(metric="cosine", vector_column_name="vector", index_type=index_type, replace=True, **kw)
+        self._ann_meta_path.write_text(json.dumps({"index_type": index_type, "partitions": parts, "rows": rows}), encoding="utf-8")
+        self._indexed = True
+        return index_type
 
     def build_ann_index(self, index_type: str = "IVF_HNSW_SQ") -> str:
         """控制台手动建 / 重建 ANN 索引（不受 index_min_rows 限制，但至少要 256 行才能训练 IVF）。"""
@@ -295,17 +428,19 @@ class LanceDBVectorStore:
         if tbl is None or len(self) < 256:
             raise ValueError("至少需要 256 行向量才能训练 IVF 索引；数据量小时精确扫描本来就最快、召回 100%")
         with write_lock(self.directory, self.table_name):
-            tbl.create_index(metric="cosine", vector_column_name="vector", index_type=index_type, replace=True)
-        self._indexed = True
-        return index_type
+            return self._build_ann(index_type, len(self))
 
-    def optimize(self) -> None:
-        """合并小文件 + 把新写入并入索引 + 清理过期旧版本。"""
+    def optimize(self, *, drop_history: bool = False) -> None:
+        """合并小文件 + 把新写入并入索引 + 清理过期旧版本。
+        drop_history：批量导入刚建完的表，旧版本只是一批一个的碎片（合并前的数据），留着会让磁盘占用翻倍——直接清掉。"""
         tbl = self._table()
         if tbl is None:
             return
         with write_lock(self.directory, self.table_name):
-            tbl.optimize(cleanup_older_than=timedelta(days=self.cfg.keep_versions_days))
+            if drop_history:
+                tbl.optimize(cleanup_older_than=timedelta(0), delete_unverified=True)
+            else:
+                tbl.optimize(cleanup_older_than=timedelta(days=self.cfg.keep_versions_days))
         self._writes = 0
 
     def save(self, directory: Path | None = None, prefix: str = "") -> None:

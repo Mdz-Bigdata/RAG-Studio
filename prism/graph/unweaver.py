@@ -90,6 +90,7 @@ def normalize_type(value: object) -> str | None:
 class EntityStore:
     def __init__(self) -> None:
         self.relations: list[EntityRelation] = []
+        self._dirty = True               # 没变就不重写 entities.json（大知识库每传一个文档都整份重写太贵）
 
     def __len__(self) -> int:
         return len(self.relations)
@@ -101,9 +102,13 @@ class EntityStore:
             if key not in seen:
                 self.relations.append(r)
                 seen.add(key)
+                self._dirty = True
 
     def remove_document(self, doc_id: str) -> None:
-        self.relations = [r for r in self.relations if r.doc_id != doc_id]
+        kept = [r for r in self.relations if r.doc_id != doc_id]
+        if len(kept) != len(self.relations):
+            self.relations = kept
+            self._dirty = True
 
     def entities(self) -> list[str]:
         return sorted({r.entity for r in self.relations})
@@ -121,6 +126,9 @@ class EntityStore:
 
     def save(self, directory: Path) -> None:
         directory.mkdir(parents=True, exist_ok=True)
+        if not self._dirty and (directory / "entities.json").exists():
+            return
+        self._dirty = False
         (directory / "entities.json").write_text(json.dumps([r.model_dump() for r in self.relations], ensure_ascii=False, indent=2), encoding="utf-8")
 
     @classmethod
@@ -129,6 +137,7 @@ class EntityStore:
         p = directory / "entities.json"
         if p.exists():
             store.relations = [EntityRelation.model_validate(x) for x in json.loads(p.read_text(encoding="utf-8"))]
+            store._dirty = False
         return store
 
 

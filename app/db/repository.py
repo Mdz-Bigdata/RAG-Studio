@@ -6,6 +6,7 @@ import json
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from .models import AppSetting, ChatMessage, ChatSession, Document, EvalReportRow, FeishuDoc, KnowledgeBase, ModelConfig
@@ -54,6 +55,11 @@ class Repository:
 
     def list_documents(self, kb_id: str) -> list[Document]:
         return self.db.query(Document).filter(Document.kb_id == kb_id).order_by(Document.created_at.desc()).all()
+
+    def document_status_counts(self, kb_id: str) -> dict[str, int]:
+        """各状态的文档数：只数行数，不把几十万篇文档整行（含正文）读出来。"""
+        rows = self.db.query(Document.status, func.count()).filter(Document.kb_id == kb_id).group_by(Document.status).all()
+        return {status: n for status, n in rows}
 
     def update_document(self, doc: Document, **fields: Any) -> Document:
         for k, v in fields.items():

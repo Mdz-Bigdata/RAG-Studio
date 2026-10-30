@@ -357,6 +357,9 @@ class IndexService:
             out.append(kb_id)
         return out
 
+    def read_meta(self, kb_id: str) -> dict | None:
+        return Index.read_meta(self.directory(kb_id))
+
     def indexed_docs(self, kb_id: str) -> int:
         meta = Index.read_meta(self.directory(kb_id)) or {}
         return int(meta.get("docs") or 0)

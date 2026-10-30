@@ -168,8 +168,8 @@ class ReindexService:
                 pending = repo.get_setting(PENDING_KEY) or {}
                 kbs = []
                 for kb in repo.list_kbs():
-                    docs = repo.list_documents(kb.id)
-                    kbs.append((kb.id, kb.name, len(docs), sum(1 for d in docs if d.status == "COMPLETED")))
+                    by_status = repo.document_status_counts(kb.id)   # 只数行数：大知识库几十万篇文档，不整行读出来
+                    kbs.append((kb.id, kb.name, sum(by_status.values()), by_status.get("COMPLETED", 0)))
             config_changed = stored is not None and stored != current
             with self._lock:
                 active = {k for k, j in self._jobs.items() if j["status"] in ("queued", "running")}
@@ -179,6 +179,12 @@ class ReindexService:
                 if n_docs == 0:
                     if kb_id in pending:
                         self._mark_pending(kb_id, None)
+                    continue
+                if self._too_big(kb_id) and (kb_id in interrupted or config_changed or index_service.needs_reindex(kb_id)):
+                    # 千万级知识库：逐篇重新入库要好几天，不在后台悄悄开始。记为待重建，在策略配置页可见，批量重建脚本处理
+                    note = f"段落数超过自动重建上限（storage.auto_rebuild_max_chunks），请运行 scripts/bulk_import.py --kb {kb_id} --rebuild"
+                    self._mark_pending(kb_id, note)
+                    logger.warning("知识库 %s 需要重建，但%s", name, note)
                     continue
                 if kb_id in interrupted:
                     self.enqueue(kb_id, name, "上次重建被中断，继续重建")
@@ -200,6 +206,11 @@ class ReindexService:
             with self._lock:
                 self._checking = False
 
+    @staticmethod
+    def _too_big(kb_id: str) -> bool:
+        meta = index_service.read_meta(kb_id) or {}
+        return int(meta.get("chunks") or 0) > settings_service.get().storage.auto_rebuild_max_chunks
+
     def _enqueue_if_incomplete(self, kb_id: str, name: str, attempt: int = 0) -> None:
         """索引里的文档数少于已完成的文档数 → 排队整库重建。
         两个数一个来自数据库、一个来自索引文件，不是同一时刻读的：中间有入库 / 删除（例如保存配置时用户正在上传）就可能错开，
@@ -211,7 +222,7 @@ class ReindexService:
         settled = before[0] == before[1]                 # 有进行中的写入就不必读了，直接等它结束
         if settled:
             with SessionLocal() as db:
-                completed = sum(1 for d in Repository(db).list_documents(kb_id) if d.status == "COMPLETED")
+                completed = Repository(db).document_status_counts(kb_id).get("COMPLETED", 0)
             indexed = index_service.indexed_docs(kb_id)
             settled = document_service.index_writes(kb_id) == before
         if not settled:
@@ -254,3 +265,4 @@ class ReindexService:
 
 
 reindex_service = ReindexService()
+

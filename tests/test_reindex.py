@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections import Counter
 from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -176,6 +177,9 @@ class _FakeDB:
 
             def list_documents(self, kb_id):
                 return [SimpleNamespace(status=s) for s in store.kbs[kb_id]]
+
+            def document_status_counts(self, kb_id):
+                return dict(Counter(store.kbs[kb_id]))
 
         return Repo()
 

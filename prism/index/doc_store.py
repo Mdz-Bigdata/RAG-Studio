@@ -1,26 +1,41 @@
-"""块存储与文档元数据：parent / child 映射、相邻块查询、元数据过滤。"""
+"""块存储与文档元数据：parent / child 映射、相邻块查询、元数据过滤。
+
+内存版：全部段落常驻内存，保存时整份重写 chunks.jsonl（万~十万级足够）。千万级用 SQLite 版（sqlite_store.py），接口一致。"""
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import date
 from pathlib import Path
 
 from ..schemas import Chunk, DocMetadata
+from .scope import ChunkScope, doc_prefix
 
 
 class ChunkStore:
+    backend = "memory"
+
     def __init__(self) -> None:
         self.chunks: dict[str, Chunk] = {}
         self.docs: dict[str, DocMetadata] = {}
         self._children_by_doc: dict[str, list[str]] = {}
+        self.generation = 0          # 文档增删 / 元数据改动时递增：检索范围缓存按它失效
 
     def __len__(self) -> int:
         return len(self.chunks)
 
     def add_document(self, doc_id: str, metadata: DocMetadata) -> None:
         self.docs[doc_id] = metadata
+        self.generation += 1
+
+    def add_documents(self, docs: dict[str, DocMetadata]) -> None:
+        self.docs.update(docs)
+        self.generation += 1
+
+    def touch_doc(self, doc_id: str) -> None:
+        """原地改过 DocMetadata 后调用：检索范围缓存失效。"""
+        self.generation += 1
 
     def add_chunks(self, chunks: list[Chunk]) -> None:
         for c in chunks:
@@ -65,11 +80,44 @@ class ChunkStore:
     def child_ids(self) -> list[str]:
         return [cid for ids in self._children_by_doc.values() for cid in ids]
 
+    def iter_chunks(self, kind: str | None = None) -> Iterator[Chunk]:
+        return (c for c in list(self.chunks.values()) if kind is None or c.kind == kind)
+
+    def chunks_of_doc(self, doc_id: str, kind: str | None = None) -> list[Chunk]:
+        return sorted((c for c in self.chunks.values() if c.doc_id == doc_id and (kind is None or c.kind == kind)), key=lambda c: (c.order, c.chunk_id))
+
+    def count_by_kind(self) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for c in self.chunks.values():
+            out[c.kind] = out.get(c.kind, 0) + 1
+        return out
+
+    def count_doc(self, doc_id: str) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for c in self.chunks.values():
+            if c.doc_id == doc_id:
+                out[c.kind] = out.get(c.kind, 0) + 1
+        return out
+
+    def doc_of(self, chunk_id: str) -> str | None:
+        d = doc_prefix(chunk_id)
+        if d in self.docs:
+            return d
+        c = self.chunks.get(chunk_id)
+        return c.doc_id if c is not None else None
+
+    def scope_chunk_ids(self, scope: ChunkScope, kinds: tuple[str, ...] = ("child",)) -> Iterator[str]:
+        """把文档级范围展开成段落 id（只给认不得 ChunkScope 的老后端用）。"""
+        if kinds == ("child",):
+            return (cid for d, ids in self._children_by_doc.items() if scope.allows_doc(d) for cid in ids)
+        return (c.chunk_id for c in self.chunks.values() if c.kind in kinds and scope.allows_doc(c.doc_id))
+
     def remove_document(self, doc_id: str) -> list[str]:
         removed = [cid for cid, c in self.chunks.items() if c.doc_id == doc_id]
         for cid in removed:
             del self.chunks[cid]
         self.docs.pop(doc_id, None)
+        self.generation += 1
         self._rebuild_order()
         return removed
 

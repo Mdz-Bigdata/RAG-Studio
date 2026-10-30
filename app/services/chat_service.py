@@ -162,7 +162,7 @@ class ChatService:
         yield _sse("relations", payload["weaved"])
         image_views: list[dict[str, Any]] = []
         if images and resolved_kb:
-            names = retrieval_service.doc_names(resolved_kb)
+            names = retrieval_service.doc_names(resolved_kb, {h.record.doc_id for h in images})
             image_views = [multimodal_service.hit_view(resolved_kb, h, names, index=i + 1) for i, h in enumerate(images)]
         yield _sse("images", image_views)
 
