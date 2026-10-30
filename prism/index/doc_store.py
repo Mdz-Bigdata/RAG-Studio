@@ -10,6 +10,7 @@ from datetime import date
 from pathlib import Path
 
 from ..schemas import Chunk, DocMetadata
+from .doc_index import DocIndex
 from .scope import ChunkScope, doc_prefix
 
 
@@ -21,6 +22,15 @@ class ChunkStore:
         self.docs: dict[str, DocMetadata] = {}
         self._children_by_doc: dict[str, list[str]] = {}
         self.generation = 0          # 文档增删 / 元数据改动时递增：检索范围缓存按它失效
+        self._doc_index: tuple[int, int, DocIndex] | None = None
+
+    @property
+    def doc_index(self) -> DocIndex:
+        """文档元数据的列式索引（过滤 / 统计取值用）。内存版的库小，文档有变动就整体重建。"""
+        key = (self.generation, id(self.docs))
+        if self._doc_index is None or self._doc_index[:2] != key or len(self._doc_index[2]) != len(self.docs):
+            self._doc_index = (*key, DocIndex.build(self.docs.items()))
+        return self._doc_index[2]
 
     def __len__(self) -> int:
         return len(self.chunks)

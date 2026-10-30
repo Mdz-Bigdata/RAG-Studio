@@ -18,6 +18,13 @@ export interface KnowledgeBase {
 
 export type DocStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
 
+/** 文档分页：total 是符合搜索条件的总数，processing 是整库正在解析 / 排队的数（轮询用）。 */
+export interface DocumentPage {
+  items: Document[];
+  total: number;
+  processing: number;
+}
+
 export interface Document {
   id: string;
   kbId: string;

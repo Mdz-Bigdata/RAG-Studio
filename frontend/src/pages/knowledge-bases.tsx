@@ -7,6 +7,8 @@ import { EntityGraph } from '../components/entity-graph';
 import { STATUS_LABEL, formatBytes, formatDate } from '../lib/format';
 import { ACCESS_LEVELS, useApp } from '../store/app-store';
 
+const PAGE_SIZE = 100;
+
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 function KbForm({ initial, onClose, onSaved }: { initial?: KnowledgeBase; onClose: () => void; onSaved: (kb: KnowledgeBase) => void }) {
@@ -375,7 +377,13 @@ export function KnowledgeBasesPage() {
   const { kbs, currentKb, setCurrentKbId, refreshKbs, refreshStatus, toast } = useApp();
   const [kbModal, setKbModal] = useState<{ kb?: KnowledgeBase } | null>(null);
   const [reprocessDoc, setReprocessDoc] = useState<Document | null>(null);
-  const [docs, setDocs] = useState<Document[]>([]);
+  const [docs, setDocs] = useState<Document[]>([]);          // 当前页
+  const [total, setTotal] = useState(0);                       // 符合搜索条件的文档总数
+  const [processing, setProcessing] = useState(0);             // 整库正在解析 / 排队的文档数
+  const [page, setPage] = useState(0);
+  const [q, setQ] = useState('');
+  const [qInput, setQInput] = useState('');
+  const loadSeq = useRef(0);
   const [loadingDocs, setLoadingDocs] = useState(false);
   const [formats, setFormats] = useState<{ extensions: string[]; mineru: boolean } | null>(null);
   const [uploading, setUploading] = useState(0);
@@ -394,24 +402,30 @@ export function KnowledgeBasesPage() {
   const fileRef = useRef<HTMLInputElement>(null);
   const kbId = currentKb?.id ?? null;
 
-  const loadDocs = useCallback(async (id: string, silent = false) => {
+  // 分页加载（知识库几十万篇文档时不能一次全拿）；切换知识库 / 翻页时丢掉迟到的结果
+  const loadDocs = useCallback(async (id: string, silent = false, at: { page: number; q: string } = { page, q }) => {
+    const seq = ++loadSeq.current;
     if (!silent) setLoadingDocs(true);
     try {
-      setDocs(await api.documents.list(id));
+      const res = await api.documents.page(id, { offset: at.page * PAGE_SIZE, limit: PAGE_SIZE, q: at.q || undefined });
+      if (seq !== loadSeq.current) return null;
+      setDocs(res.items); setTotal(res.total); setProcessing(res.processing);
+      return res;
     } catch (e) {
-      if (!silent) toast(errMsg(e), 'bad');
+      if (!silent && seq === loadSeq.current) toast(errMsg(e), 'bad');
+      return null;
     } finally {
-      setLoadingDocs(false);
+      if (seq === loadSeq.current) setLoadingDocs(false);
     }
-  }, [toast]);
+  }, [toast, page, q]);
 
   useEffect(() => { api.documents.supportedFormats().then(setFormats).catch(() => undefined); }, []);
   useEffect(() => {
-    setDocs([]);
+    setDocs([]); setTotal(0); setProcessing(0); setPage(0); setQ(''); setQInput('');
     setEntities([]);
     setGraph(null);
-    if (kbId) loadDocs(kbId);
-  }, [kbId, loadDocs]);
+  }, [kbId]);
+  useEffect(() => { if (kbId) loadDocs(kbId); }, [kbId, loadDocs]);
   useEffect(() => {
     if (!kbId || tab !== 'entities') return;
     api.kb.entities(kbId).then(setEntities).catch(() => setEntities([]));
@@ -421,23 +435,21 @@ export function KnowledgeBasesPage() {
       .then((g) => setGraph((prev) => (prev && JSON.stringify(prev) === JSON.stringify(g) ? prev : g)))
       .catch(() => setGraph(null))
       .finally(() => setGraphLoading(false));
-  }, [kbId, tab, docs]); // eslint-disable-line
+  }, [kbId, tab, processing]); // eslint-disable-line
 
-  // 轮询处理中的文档
-  const busy = docs.some((d) => d.status === 'PENDING' || d.status === 'PROCESSING') || !!currentKb?.needsReindex || !!currentKb?.reindexing;
+  // 轮询处理中的文档（按整库的处理中数量判断，不只看当前页）
+  const busy = processing > 0 || !!currentKb?.needsReindex || !!currentKb?.reindexing;
   useEffect(() => {
     if (!kbId || !busy) return;
     const t = window.setInterval(async () => {
-      const list = await api.documents.list(kbId).catch(() => null);
-      if (!list) return;
-      setDocs(list);
-      if (!list.some((d) => d.status === 'PENDING' || d.status === 'PROCESSING')) {
+      const res = await loadDocs(kbId, true);
+      if (res && res.processing === 0) {
         refreshKbs().catch(() => undefined);
         refreshStatus();
       }
     }, 2000);
     return () => window.clearInterval(t);
-  }, [kbId, busy, refreshKbs, refreshStatus]);
+  }, [kbId, busy, loadDocs, refreshKbs, refreshStatus]);
 
   const upload = async (files: FileList | File[]) => {
     if (!kbId) return;
@@ -446,7 +458,7 @@ export function KnowledgeBasesPage() {
     for (const f of list) {
       try {
         const d = await api.documents.upload(kbId, f);
-        setDocs((prev) => [d, ...prev]);
+        setDocs((prev) => [d, ...prev]); setTotal((t) => t + 1); setProcessing((p) => p + 1);
       } catch (e) {
         toast(`${f.name}：${errMsg(e)}`, 'bad');
       }
@@ -458,7 +470,7 @@ export function KnowledgeBasesPage() {
     if (!confirmDialog(`确定删除文档"${d.fileName}"？对应的切片、向量与实体会一并清除。`)) return;
     try {
       await api.documents.remove(d.id);
-      setDocs((prev) => prev.filter((x) => x.id !== d.id));
+      setDocs((prev) => prev.filter((x) => x.id !== d.id)); setTotal((t) => Math.max(0, t - 1));
       refreshKbs();
       toast('文档已删除', 'ok');
     } catch (e) {
@@ -546,16 +558,35 @@ export function KnowledgeBasesPage() {
 
           <div className="card">
             <div className="card-header">
-              <Tabs value={tab} onChange={setTab} items={[{ value: 'docs', label: `文档（${docs.length}）`, icon: <FileText size={13} /> }, { value: 'entities', label: '实体织网', icon: <Network size={13} /> }, { value: 'parsing', label: '解析能力', icon: <ScanText size={13} /> }]} />
+              <Tabs value={tab} onChange={setTab} items={[{ value: 'docs', label: `文档（${total}）`, icon: <FileText size={13} /> }, { value: 'entities', label: '实体织网', icon: <Network size={13} /> }, { value: 'parsing', label: '解析能力', icon: <ScanText size={13} /> }]} />
               <div className="row gap-8">
+                {tab === 'docs' ? (
+                  <form className="row gap-4" onSubmit={(e) => { e.preventDefault(); setPage(0); setQ(qInput.trim()); }}>
+                    <input value={qInput} onChange={(e) => setQInput(e.target.value)} placeholder="按文件名 / 标题搜索" style={{ width: 180, padding: '4px 8px', fontSize: 12 }} aria-label="搜索文档" />
+                    {q ? <Button type="button" size="xs" variant="ghost" onClick={() => { setQInput(''); setQ(''); setPage(0); }}>清除</Button> : null}
+                  </form>
+                ) : null}
                 <Button size="sm" onClick={reindex} title="按当前解析 / 切片 / 向量配置重建整库索引"><RefreshCw size={13} />重建索引</Button>
                 <Button size="sm" variant="ghost" icon onClick={() => kbId && loadDocs(kbId)}><RefreshCw size={13} /></Button>
               </div>
             </div>
             {tab === 'docs' ? (
               <div>
-                {loadingDocs ? <div className="card-body"><Spinner label="加载中…" /></div> : docs.length === 0 ? <Empty icon={<FileText size={36} />} title="知识库是空的" desc="上传 PDF / Word / PPT / Excel / Markdown 文档，系统会自动解析、清洗、切片并建立向量 + BM25 索引。" /> : (
+                {loadingDocs ? <div className="card-body"><Spinner label="加载中…" /></div> : docs.length === 0 ? (
+                  q ? <Empty icon={<FileText size={36} />} title="没有匹配的文档" desc={`没有文件名或标题包含“${q}”的文档。`} />
+                    : <Empty icon={<FileText size={36} />} title="知识库是空的" desc="上传 PDF / Word / PPT / Excel / Markdown 文档，系统会自动解析、清洗、切片并建立向量 + BM25 索引。" />
+                ) : (
                   <div>
+                    {total > PAGE_SIZE ? (
+                      <div className="row between card-body" style={{ paddingTop: 8, paddingBottom: 8 }}>
+                        <span className="xs faint">第 {page * PAGE_SIZE + 1}–{Math.min(total, (page + 1) * PAGE_SIZE)} 篇，共 {total} 篇{q ? `（含“${q}”）` : ''}</span>
+                        <div className="row gap-4">
+                          <Button size="xs" disabled={page === 0} onClick={() => setPage((p) => p - 1)}>上一页</Button>
+                          <span className="xs mono">{page + 1} / {Math.ceil(total / PAGE_SIZE)}</span>
+                          <Button size="xs" disabled={(page + 1) * PAGE_SIZE >= total} onClick={() => setPage((p) => p + 1)}>下一页</Button>
+                        </div>
+                      </div>
+                    ) : null}
                     {docs.map((d) => {
                       const expired = !!d.validTo && d.validTo < new Date().toISOString().slice(0, 10);
                       return (

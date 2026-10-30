@@ -391,3 +391,37 @@ def test_bulk_import_cli_into_web_kb(tmp_path: Path, monkeypatch, capsys):
             c.post("/api/v1/settings/reset")
     finally:
         cfg.data_dir, cfg.upload_dir, cfg.index_root = saved
+
+
+def test_document_page_endpoint(tmp_path: Path):
+    """知识库几十万篇文档时「知识库」页分页取：offset / limit / 按文件名或标题搜索，processing 是整库的处理中数。"""
+    from fastapi.testclient import TestClient
+
+    from app import config as app_config_mod
+    from app.db import Document, SessionLocal
+
+    cfg = app_config_mod.app_config
+    saved = (cfg.data_dir, cfg.upload_dir, cfg.index_root)
+    cfg.data_dir, cfg.upload_dir, cfg.index_root = tmp_path, tmp_path / "uploads", tmp_path / "indexes"
+    for d in (cfg.upload_dir, cfg.index_root):
+        d.mkdir(parents=True, exist_ok=True)
+    from app.main import app
+
+    try:
+        with TestClient(app) as c:
+            kb = c.post("/api/v1/knowledge-bases/", json={"name": "分页库"}).json()["id"]
+            with SessionLocal() as db:   # 直接造 250 行：不走解析
+                for i in range(250):
+                    db.add(Document(id=f"pg{i:04d}", kb_id=kb, file_name=f"文件{i:04d}.md", title=("季度报告" if i % 50 == 0 else f"标题{i}"),
+                                    status="PROCESSING" if i < 3 else "COMPLETED", chunk_count=1))
+                db.commit()
+            first = c.get(f"/api/v1/documents/page?kbId={kb}&offset=0&limit=100").json()
+            assert first["total"] == 250 and first["processing"] == 3 and len(first["items"]) == 100
+            last = c.get(f"/api/v1/documents/page?kbId={kb}&offset=200&limit=100").json()
+            assert len(last["items"]) == 50 and not {d["id"] for d in last["items"]} & {d["id"] for d in first["items"]}
+            hit = c.get(f"/api/v1/documents/page?kbId={kb}&q=季度").json()
+            assert hit["total"] == 5 and all("季度" in d["title"] for d in hit["items"]) and hit["processing"] == 3   # 搜索不影响处理中数
+            assert c.get(f"/api/v1/documents/page?kbId={kb}&q=文件0001").json()["total"] == 1
+            assert len(c.get(f"/api/v1/documents/page?kbId={kb}&limit=9999").json()["items"]) == 250   # limit 封顶 500，这里只有 250 篇
+    finally:
+        cfg.data_dir, cfg.upload_dir, cfg.index_root = saved

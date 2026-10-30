@@ -25,6 +25,7 @@ from datetime import date
 from pathlib import Path
 
 from ..schemas import Chunk, DocMetadata
+from .doc_index import DocIndex
 from .scope import ChunkScope, doc_prefix
 
 logger = logging.getLogger(__name__)
@@ -128,6 +129,7 @@ class SqliteChunkStore:
         self.docs = _DocDict({doc_id: DocMetadata.model_validate_json(body) for doc_id, body in self._rows("SELECT doc_id, body FROM docs")})
         self.docs.dirty.clear()
         self.docs.on_change = self._bump
+        self.doc_index = DocIndex.build(self.docs.items())     # 增量维护：增删 / 改元数据时同步
         self.chunks = _ChunkView(self)
 
     # --- 连接：每个线程一个（WAL 模式下读写互不阻塞）------------------------------------
@@ -274,12 +276,14 @@ class SqliteChunkStore:
     # --- 写（每次调用一个事务，立即提交）---------------------------------------------------
     def add_document(self, doc_id: str, metadata: DocMetadata) -> None:
         self.docs[doc_id] = metadata
+        self.doc_index.upsert(doc_id, metadata)
         self._flush_docs()
 
     def add_documents(self, docs: dict[str, DocMetadata]) -> None:
         """批量导入：一批文档一个事务。"""
         for doc_id, md in docs.items():
             dict.__setitem__(self.docs, doc_id, md)
+            self.doc_index.upsert(doc_id, md)
         self.docs.dirty.update(docs)
         self.docs.removed.difference_update(docs)
         self._bump()
@@ -305,6 +309,7 @@ class SqliteChunkStore:
             self._count = None
         self._forget(removed)
         self.docs.pop(doc_id, None)
+        self.doc_index.remove(doc_id)
         self._flush_docs()
         return removed
 
@@ -336,6 +341,7 @@ class SqliteChunkStore:
         """原地改过 DocMetadata 后调用：save() 时写回，检索范围缓存失效。"""
         if doc_id in self.docs:
             self.docs.dirty.add(doc_id)
+            self.doc_index.upsert(doc_id, self.docs[doc_id])
             self._bump()
 
     def _flush_docs(self) -> None:
@@ -387,9 +393,7 @@ class SqliteChunkStore:
                     store.add_chunks(batch)
                     batch = []
             store.add_chunks(batch)
-            for doc_id, md in old.docs.items():
-                store.docs[doc_id] = md
-            store._flush_docs()
+            store.add_documents(old.docs)
             legacy.rename(directory / "chunks.jsonl.migrated")
             store._forget()
         return store

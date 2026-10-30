@@ -44,7 +44,6 @@ from .hierarchy import LEVEL_LABEL, levels_for
 from .metadata_filter import describe, extract_llm, extract_rule, facets, matches
 from .query_transform import QueryPlan, QueryTransformer
 from .rerank import BaseReranker, NoopReranker, build_reranker
-from .temporal import history_intent
 
 logger = logging.getLogger(__name__)
 
@@ -89,8 +88,7 @@ class HybridRetriever:
 
         include_expired = False
         if cfg.filter_expired and cfg.history_intent:
-            docs = self.index.store.docs.values()
-            hit = history_intent(query, docs, on_date) if self._has_expired(on_date) else None
+            hit = self._history_intent(query, on_date) if self._has_expired(on_date) else None
             if hit:
                 include_expired = True
                 trace.notes.append(f"时效：问题在问历史规定（“{hit}”），本次检索包含已失效的文档，资料中会标注失效")
@@ -261,20 +259,27 @@ class HybridRetriever:
         conditions = {f: list(v) for f, v in conditions.items() if v}
         if not conditions:
             return allowed
-        scope = self._scope_docs(allowed)
-        keep = {doc_id for doc_id, md in scope.items() if matches(md, conditions, include_missing=cfg.metadata_filter.include_missing)}
-        info = {"conditions": conditions, "source": source, "docs_before": len(scope), "docs_after": len(keep), "applied": False}
+        if allowed is None or isinstance(allowed, ChunkScope):
+            di = self.index.store.doc_index
+            rows = di.live() if allowed is None else (di.rows_of(allowed.include) if allowed.include is not None else di.live() & ~di.rows_of(allowed.exclude))
+            n_before = int(rows.sum())
+            keep = set(di.ids_where(rows & di.match(conditions, include_missing=cfg.metadata_filter.include_missing)))
+        else:
+            scope = self._scope_docs(allowed)
+            n_before = len(scope)
+            keep = {doc_id for doc_id, md in scope.items() if matches(md, conditions, include_missing=cfg.metadata_filter.include_missing)}
+        info = {"conditions": conditions, "source": source, "docs_before": n_before, "docs_after": len(keep), "applied": False}
         trace.metadata_filter = info
         label = "沿用首次检索的条件" if source == "upstream" else "从问题中识别"
         if not keep:
             info["reason"] = "no_match"
             trace.notes.append(f"元数据过滤（{label}）：{describe(conditions)}，没有匹配的文档，本次不使用该条件")
             return allowed
-        if len(keep) == len(scope):
+        if len(keep) == n_before:
             info["reason"] = "no_narrowing"   # 范围内的文档本来就都满足，不必提示
             return allowed
         info["applied"] = True
-        trace.notes.append(f"元数据过滤（{label}）：{describe(conditions)} → 候选文档 {len(scope)} 篇缩小到 {len(keep)} 篇"
+        trace.notes.append(f"元数据过滤（{label}）：{describe(conditions)} → 候选文档 {n_before} 篇缩小到 {len(keep)} 篇"
                            + ("（未填该属性的文档保留）" if cfg.metadata_filter.include_missing else ""))
         if allowed is None or isinstance(allowed, ChunkScope):
             return allowed.restrict(keep) if allowed is not None else self._new_scope(include=frozenset(keep))
@@ -335,22 +340,42 @@ class HybridRetriever:
         if hit is not None:
             self.index.scope_cache.move_to_end(key)
             return hit
-        keep: list[str] = []
+        # 列式索引上一次算完（几百万篇文档也只要几十毫秒），不逐篇拿 DocMetadata 判断
+        di = store.doc_index
+        mask = di.effective(on_date) if need_effective else di.live()
         hidden = 0
-        for doc_id, md in store.docs.items():
-            if need_effective and not md.is_effective(on_date):
-                continue
-            if user is not None and not md.is_visible_to(user):
-                hidden += 1
-                continue
-            if explicit and not _doc_matches(doc_id, md, explicit):
-                continue
-            keep.append(doc_id)
+        if user is not None:
+            vis = di.visible(user)
+            hidden = int((mask & ~vis).sum())
+            mask &= vis
+        if explicit:
+            want_docs = explicit.get("doc_id")
+            if want_docs is not None:
+                mask &= di.rows_of(_as_list(want_docs))
+            rest = {k: _as_list(v) for k, v in explicit.items() if k != "doc_id"}
+            if rest:
+                # 显式指定的条件按字面执行：没填该属性的文档不算匹配
+                mask &= di.match(rest, include_missing=False, today=on_date)
+        keep = di.ids_where(mask)
         scope = ChunkScope.of_docs(keep, store.docs.keys(), doc_of=store.doc_of, expand=store.scope_chunk_ids)
-        if explicit:   # 显式条件按字面执行：不认识的文档（没有元数据）不算匹配，只能用"允许列表"表示
+        if explicit:   # 显式条件：不认识的文档（没有元数据）不算匹配，只能用"允许列表"表示
             scope = self._new_scope(include=frozenset(keep))
         self._remember(key, (scope, hidden))
         return scope, hidden
+
+    def _history_intent(self, query: str, on_date: date | None) -> str | None:
+        """temporal.history_intent 的列式版：说法直接匹配；年份在列式索引上判断是否落在已失效文档里。"""
+        from .temporal import _HISTORY, _YEAR
+
+        for pat in _HISTORY:
+            m = pat.search(query or "")
+            if m:
+                return m.group(0)
+        years = {int(y) for y in _YEAR.findall(query or "")}
+        if not years:
+            return None
+        y = self.index.store.doc_index.history_year(years, on_date)
+        return str(y) if y is not None else None
 
     def _facets(self, allowed: set[str] | ChunkScope | None) -> dict[str, Any]:
         """范围内文档的各属性取值（自查询要在这些取值里挑条件）。每次查询都要用、要遍历文档：按范围缓存。"""
@@ -360,7 +385,14 @@ class HybridRetriever:
         key = ("facets", store.generation, len(store.docs), None if allowed is None else (allowed.include, allowed.exclude))
         hit = self.index.scope_cache.get(key)
         if hit is None:
-            hit = facets(self._scope_docs(allowed).values())
+            di = store.doc_index
+            if allowed is None:
+                rows = di.live()
+            elif allowed.include is not None:
+                rows = di.rows_of(allowed.include)
+            else:
+                rows = di.live() & ~di.rows_of(allowed.exclude)
+            hit = di.facets(rows)
             self._remember(key, hit)
         return hit
 
@@ -369,7 +401,8 @@ class HybridRetriever:
         key = ("expired", store.generation, len(store.docs), on_date or date.today())
         hit = self.index.scope_cache.get(key)
         if hit is None:
-            hit = any(not md.is_effective(on_date) for md in store.docs.values())
+            di = store.doc_index
+            hit = bool((di.live() & ~di.effective(on_date)).any())
             self._remember(key, hit)
         return hit
 
@@ -388,12 +421,15 @@ class HybridRetriever:
         """文档级可见性（过期 / 权限），给文本检索之外的旁路用（回答附图）：与 retrieve 同一套规则，
         问历史规定时放行过期文档。None = 不需要过滤。"""
         cfg = self.cfg
-        docs = self.index.store.docs
+        di = self.index.store.doc_index
         user = (filters or {}).get("user") if cfg.access.enabled else None
-        expired_ok = not cfg.filter_expired or bool(cfg.history_intent and history_intent(query, docs.values(), on_date))
+        expired_ok = not cfg.filter_expired or bool(cfg.history_intent and self._has_expired(on_date) and self._history_intent(query, on_date))
         if expired_ok and user is None:
             return None
-        return {doc_id for doc_id, md in docs.items() if (expired_ok or md.is_effective(on_date)) and (user is None or md.is_visible_to(user))}
+        mask = di.live() if expired_ok else di.effective(on_date)
+        if user is not None:
+            mask &= di.visible(user)
+        return set(di.ids_where(mask))
 
     def _weave_allow(self, allowed: set[str] | ChunkScope | None):
         """织入块（parent）是否通过了本次检索的元数据过滤：allowed 是 child id，换算成它们所属的 parent。"""
@@ -646,17 +682,6 @@ def _take_top(contexts, top_k: int, order: str):
 
 def _fmt(score: float | None) -> str:
     return "无" if score is None else f"{score:.3f}"
-
-
-def _doc_matches(doc_id: str, md: DocMetadata, explicit: dict[str, Any]) -> bool:
-    """显式过滤条件（文档级的那几种）是否满足：与段落级判断的语义一致——按字面执行，没填该属性的不算匹配。"""
-    for key, want in explicit.items():
-        if key == "doc_id":
-            if doc_id not in _as_list(want):
-                return False
-        elif not matches(md, {key: _as_list(want)}, include_missing=False):
-            return False
-    return True
 
 
 def _freeze(v: Any) -> Any:

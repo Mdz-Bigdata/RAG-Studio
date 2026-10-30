@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from prism.ingest.parsers import ParserRegistry
 
 from ..db import Document, Repository, get_db
-from ..schemas import ChunkView, DocumentEditRequest, DocumentMarkdownResponse, DocumentMetaUpdate, DocumentResponse
+from ..schemas import ChunkView, DocumentEditRequest, DocumentMarkdownResponse, DocumentMetaUpdate, DocumentPage, DocumentResponse
 from ..services import document_service, settings_service
 
 router = APIRouter()
@@ -56,7 +56,17 @@ def upload(kbId: str, background: BackgroundTasks, file: UploadFile = File(...),
 
 @router.get("/", response_model=list[DocumentResponse])
 def list_documents(kbId: str, db: Session = Depends(get_db)):
+    """全部文档（脚本 / 旧调用方用）。界面用下面的分页接口。"""
     return [doc_response(d) for d in Repository(db).list_documents(kbId)]
+
+
+@router.get("/page", response_model=DocumentPage)
+def list_documents_page(kbId: str, offset: int = 0, limit: int = 100, q: str | None = None, db: Session = Depends(get_db)):
+    """分页 + 按文件名 / 标题搜索。processing 是整库正在处理的文档数，界面据此决定要不要轮询。"""
+    repo = Repository(db)
+    items, total = repo.list_documents_page(kbId, offset=offset, limit=limit, q=q)
+    counts = repo.document_status_counts(kbId)
+    return DocumentPage(items=[doc_response(d) for d in items], total=total, processing=counts.get("PENDING", 0) + counts.get("PROCESSING", 0))
 
 
 @router.get("/{doc_id}", response_model=DocumentResponse)

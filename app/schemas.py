@@ -46,6 +46,12 @@ class KBResponse(BaseModel):
 
 
 # --- 文档 -----------------------------------------------------------------------------
+class DocumentPage(BaseModel):
+    items: list["DocumentResponse"]
+    total: int                           # 符合条件（含搜索词）的文档数
+    processing: int                      # 整库正在解析 / 排队的文档数（轮询用，不受分页和搜索影响）
+
+
 class DocumentResponse(BaseModel):
     id: str
     kbId: str

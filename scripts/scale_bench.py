@@ -35,6 +35,9 @@ CHILDREN_PER_DOC = CHILDREN_PER_PARENT * PARENTS_PER_DOC
 TODAY = date(2026, 10, 30)
 
 
+INDEX_TYPE = "IVF_HNSW_SQ"     # build --index-type 可改；query 从 bench_build.json 读回
+
+
 def scale_settings(directory: Path):
     from prism.config import Settings
 
@@ -42,7 +45,7 @@ def scale_settings(directory: Path):
     st.storage.chunk_store = "sqlite"
     st.vector_store.backend = "lancedb"
     st.vector_store.lancedb.fts_tokenizer = "jieba"
-    st.vector_store.lancedb.index_type = "IVF_HNSW_SQ"
+    st.vector_store.lancedb.index_type = INDEX_TYPE
     st.retrieval.sparse_backend = "lancedb_fts"
     return st
 
@@ -134,11 +137,12 @@ def pct(xs: list[float], p: float) -> float:
 
 # --------------------------------------------------------------------------------------
 def build(args) -> dict:
-    global DIM
+    global DIM, INDEX_TYPE
     from prism.index import Index
     from prism.ingest.bulk import BulkIndexer
 
     DIM = SyntheticEmbedder.dim = args.dim
+    INDEX_TYPE = args.index_type
 
     if args.dir.exists():
         shutil.rmtree(args.dir)
@@ -169,11 +173,13 @@ def build(args) -> dict:
 
 
 def query(args) -> dict:
-    global DIM
+    global DIM, INDEX_TYPE
     from prism.index import Index
     from prism.retrieval import HybridRetriever
 
-    DIM = SyntheticEmbedder.dim = json.loads((args.dir / "bench_build.json").read_text(encoding="utf-8"))["dim"]
+    built = json.loads((args.dir / "bench_build.json").read_text(encoding="utf-8"))
+    DIM = SyntheticEmbedder.dim = built["dim"]
+    INDEX_TYPE = built["ann"]["index_type"]
 
     st = scale_settings(args.dir)
     st.vector_store.search.nprobes_ratio = args.nprobes_ratio
@@ -233,6 +239,7 @@ def query(args) -> dict:
                          {"dense": dense, "dense+filter": dense_f, "sparse": sparse, "sparse+filter": sparse_f, "hybridRetrieve": full}.items()},
            "recallAt10": round(float(np.mean(rec)), 3), "denseFindsSource@10": round(hit_self / len(rec), 3), "sparseFindsSource@10": round(sparse_hit, 3)}
     print(json.dumps(out, ensure_ascii=False, indent=2))
+    out["indexType"] = INDEX_TYPE
     (args.dir / f"bench_query_{args.nprobes_ratio}.json").write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
     return out
 
@@ -246,6 +253,7 @@ def main() -> None:
     b.add_argument("--batch", type=int, default=20000)
     b.add_argument("--workers", type=int, default=8, help="jieba 分词进程数")
     b.add_argument("--dim", type=int, default=1024)
+    b.add_argument("--index-type", default="IVF_HNSW_SQ", choices=["IVF_HNSW_SQ", "IVF_PQ", "IVF_FLAT"])
     b.add_argument("--min-free-gb", type=float, default=25, help="磁盘剩余低于它就中止（建索引还要临时空间）")
     q = sub.add_parser("query")
     q.add_argument("--dir", type=Path, required=True)

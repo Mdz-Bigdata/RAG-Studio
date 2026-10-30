@@ -1,5 +1,5 @@
 // 后端 API 客户端。开发态通过 Vite 代理 `/api` → FastAPI（VITE_API_TARGET，默认 http://localhost:8000）；生产态由 FastAPI 静态托管。
-import type { AliasSuggestion, AugmentState, FaqStatus, HealthReport, MetaField, MetaRow, MineruConnectionTest, ChatMessage, ChatPlan, ChatSession, ChatSource, ChunkView, CoverageReport, Document, EntityRelation, EvalExample, EvalReport, ImageHitView, ImageView, KnowledgeBase, MultimodalEvalReport, MineruTiersInfo, ModelConfig, MultimodalMode, MultimodalResponse, MultimodalStatus, SimilarResponse, DuplicatesResponse, ParsingInfo, PopoStatus, EditBackup, PresetsPayload, ProviderPreset, RetrievalMode, RetrievalOverrides, RetrievalResponse, RouteResult, RuntimeInfo, SettingsPayload, SystemStatus, WeavedRelation, ReindexStatus, UserIdentity, VectorBenchmark, KbGraph } from './types';
+import type { AliasSuggestion, AugmentState, FaqStatus, HealthReport, MetaField, MetaRow, MineruConnectionTest, ChatMessage, ChatPlan, ChatSession, ChatSource, ChunkView, CoverageReport, Document, DocumentPage, EntityRelation, EvalExample, EvalReport, ImageHitView, ImageView, KnowledgeBase, MultimodalEvalReport, MineruTiersInfo, ModelConfig, MultimodalMode, MultimodalResponse, MultimodalStatus, SimilarResponse, DuplicatesResponse, ParsingInfo, PopoStatus, EditBackup, PresetsPayload, ProviderPreset, RetrievalMode, RetrievalOverrides, RetrievalResponse, RouteResult, RuntimeInfo, SettingsPayload, SystemStatus, WeavedRelation, ReindexStatus, UserIdentity, VectorBenchmark, KbGraph } from './types';
 import type { HardNegativeMiningConfig, HardNegativeReport, MetadataFacets } from './types';
 
 export const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? '/api/v1';
@@ -56,6 +56,8 @@ export const api = {
   documents: {
     supportedFormats: () => request<{ extensions: string[]; mineru: boolean }>('/documents/supported-formats'),
     list: (kbId: string) => request<Document[]>(`/documents/?kbId=${encodeURIComponent(kbId)}`),
+    page: (kbId: string, p: { offset: number; limit: number; q?: string }) =>
+      request<DocumentPage>(`/documents/page?kbId=${encodeURIComponent(kbId)}&offset=${p.offset}&limit=${p.limit}${p.q ? `&q=${encodeURIComponent(p.q)}` : ''}`),
     get: (id: string) => request<Document>(`/documents/${id}`),
     upload: (kbId: string, file: File) => {
       const fd = new FormData();

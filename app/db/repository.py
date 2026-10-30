@@ -56,6 +56,16 @@ class Repository:
     def list_documents(self, kb_id: str) -> list[Document]:
         return self.db.query(Document).filter(Document.kb_id == kb_id).order_by(Document.created_at.desc()).all()
 
+    def list_documents_page(self, kb_id: str, *, offset: int = 0, limit: int = 100, q: str | None = None) -> tuple[list[Document], int]:
+        """分页列文档（知识库几十万篇时「知识库」页不能一次全拿）：(本页, 符合条件的总数)。q 按文件名 / 标题模糊匹配。"""
+        query = self.db.query(Document).filter(Document.kb_id == kb_id)
+        if q and q.strip():
+            like = f"%{q.strip()}%"
+            query = query.filter((Document.file_name.ilike(like)) | (Document.title.ilike(like)))
+        total = query.count()
+        items = query.order_by(Document.created_at.desc(), Document.id).offset(max(0, offset)).limit(max(1, min(limit, 500))).all()
+        return items, total
+
     def document_status_counts(self, kb_id: str) -> dict[str, int]:
         """各状态的文档数：只数行数，不把几十万篇文档整行（含正文）读出来。"""
         rows = self.db.query(Document.status, func.count()).filter(Document.kb_id == kb_id).group_by(Document.status).all()
