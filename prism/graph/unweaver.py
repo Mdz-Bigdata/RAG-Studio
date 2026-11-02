@@ -12,7 +12,7 @@ import re
 from collections.abc import Callable
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from ..schemas import Chunk, Context, WeavedRelation
 
@@ -88,26 +88,52 @@ def normalize_type(value: object) -> str | None:
 
 
 class EntityStore:
+    """实体关系表。按实体名建了索引：mentioned_in 不再逐条扫描全部关系（千万级知识库几万条关系、每条上下文都扫一遍，
+    每次查询多出几十到上百毫秒），而是枚举正文里长度不超过最长实体名的全部子串去查表——语义与"实体名是正文子串"完全一致。"""
+
+    MAX_ENTITY_CHARS = 32              # 比这更长的实体名按子串枚举太贵：退回逐条匹配（极少见）
+
     def __init__(self) -> None:
         self.relations: list[EntityRelation] = []
         self._dirty = True               # 没变就不重写 entities.json（大知识库每传一个文档都整份重写太贵）
+        self._by_entity: dict[str, list[EntityRelation]] = {}    # 实体名（小写）→ 关系
+        self._long: list[EntityRelation] = []                     # 实体名超长的关系
+        self._max_len = 0
+        self._keys: set[tuple[str, str, str, str | None]] = set()
 
     def __len__(self) -> int:
         return len(self.relations)
 
+    def _index(self, r: EntityRelation) -> None:
+        e = r.entity.lower()
+        if len(e) < 2:
+            return
+        if len(e) > self.MAX_ENTITY_CHARS:
+            self._long.append(r)
+            return
+        self._by_entity.setdefault(e, []).append(r)
+        self._max_len = max(self._max_len, len(e))
+
+    def _rebuild(self) -> None:
+        self._by_entity, self._long, self._max_len = {}, [], 0
+        self._keys = {(r.entity.lower(), r.chunk_id, r.relation_type, r.target) for r in self.relations}
+        for r in self.relations:
+            self._index(r)
+
     def add(self, relations: list[EntityRelation]) -> None:
-        seen = {(r.entity.lower(), r.chunk_id, r.relation_type, r.target) for r in self.relations}
         for r in relations:
             key = (r.entity.lower(), r.chunk_id, r.relation_type, r.target)
-            if key not in seen:
+            if key not in self._keys:
                 self.relations.append(r)
-                seen.add(key)
+                self._keys.add(key)
+                self._index(r)
                 self._dirty = True
 
     def remove_document(self, doc_id: str) -> None:
         kept = [r for r in self.relations if r.doc_id != doc_id]
         if len(kept) != len(self.relations):
             self.relations = kept
+            self._rebuild()
             self._dirty = True
 
     def entities(self) -> list[str]:
@@ -117,8 +143,26 @@ class EntityStore:
         return [r for r in self.relations if r.relation_type == "DEFINED_IN"]
 
     def mentioned_in(self, text: str) -> list[EntityRelation]:
+        """正文里出现了哪些实体（实体名是正文的子串）。结果顺序与关系表一致。"""
         low = text.lower()
-        return [r for r in self.relations if len(r.entity) >= 2 and r.entity.lower() in low]
+        hits: list[EntityRelation] = []
+        if self._by_entity:
+            seen: set[str] = set()
+            n = len(low)
+            for i in range(n):
+                for L in range(2, min(self._max_len, n - i) + 1):
+                    sub = low[i:i + L]
+                    if sub in seen:
+                        continue
+                    rels = self._by_entity.get(sub)
+                    if rels:
+                        seen.add(sub)
+                        hits.extend(rels)
+        hits.extend(r for r in self._long if r.entity.lower() in low)
+        if len(hits) > 1:
+            order = {id(r): k for k, r in enumerate(self.relations)}
+            hits.sort(key=lambda r: order.get(id(r), 0))
+        return hits
 
     def neighbors(self, entity: str) -> list[EntityRelation]:
         e = entity.lower()
@@ -137,6 +181,7 @@ class EntityStore:
         p = directory / "entities.json"
         if p.exists():
             store.relations = [EntityRelation.model_validate(x) for x in json.loads(p.read_text(encoding="utf-8"))]
+            store._rebuild()
             store._dirty = False
         return store
 

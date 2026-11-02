@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 
 from ..config import SparseConfig
+from .scope import ChunkScope, doc_prefix
 
 PRECISE_TOKEN = re.compile(
     r"(?<![A-Za-z0-9])(?:"
@@ -39,6 +40,7 @@ class BM25Store:
         self.cfg = cfg
         self.ids: list[str] = []
         self.corpus_tokens: list[list[str]] = []
+        self._doc_arr: np.ndarray | None = None      # ids 对应的文档前缀（numpy 数组，按文档过滤用；ids 变了重建）
         self._index = None
         self._dirty = False
         self._jieba = None
@@ -81,6 +83,7 @@ class BM25Store:
             self.ids.append(cid)
             self.corpus_tokens.append(self.tokenize(text))
         self._dirty = True
+        self._doc_arr = None
 
     def _ensure_index(self) -> None:
         if self._index is not None and not self._dirty:
@@ -115,12 +118,23 @@ class BM25Store:
                     if precise & set(toks):
                         scores[i] += self.cfg.exact_token_boost
         if allowed_ids is not None:
-            mask = np.fromiter((cid in allowed_ids for cid in self.ids), dtype=bool, count=len(self.ids))
-            scores = np.where(mask, scores, -np.inf)
+            scores = np.where(self._mask(allowed_ids), scores, -np.inf)
         k = min(top_n, len(self.ids))
         idx = np.argpartition(-scores, k - 1)[:k]
         idx = idx[np.argsort(-scores[idx])]
         return [(self.ids[i], float(scores[i])) for i in idx if np.isfinite(scores[i]) and scores[i] > 0]
+
+    def _mask(self, allowed_ids) -> np.ndarray:
+        """可见段落的掩码。文档级范围（ChunkScope）用 numpy 按文档前缀算（30 万段落 66 ms → 几毫秒），段落 id 集合逐个判断。"""
+        if isinstance(allowed_ids, ChunkScope):
+            if allowed_ids.unrestricted:
+                return np.ones(len(self.ids), dtype=bool)
+            if self._doc_arr is None or len(self._doc_arr) != len(self.ids):
+                self._doc_arr = np.asarray([doc_prefix(c) for c in self.ids], dtype=object)
+            if allowed_ids.include is not None:
+                return np.isin(self._doc_arr, list(allowed_ids.include))
+            return ~np.isin(self._doc_arr, list(allowed_ids.exclude))
+        return np.fromiter((cid in allowed_ids for cid in self.ids), dtype=bool, count=len(self.ids))
 
     def _scores(self, q_tokens: list[str]) -> np.ndarray:
         # 查询里不在词表中的 token 会被 bm25s 忽略；全部未知时返回全零
@@ -139,6 +153,7 @@ class BM25Store:
             self.ids = [cid for cid, _ in keep]
             self.corpus_tokens = [toks for _, toks in keep]
             self._dirty = True
+            self._doc_arr = None
 
     def save(self, directory: Path, prefix: str = "") -> None:
         directory.mkdir(parents=True, exist_ok=True)

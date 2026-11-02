@@ -251,8 +251,9 @@ class IndexService:
         settings = settings_service.get()
         with self.lock(kb_id):
             self._tls.rebuilding = kb_id
-            if settings.vector_store.backend == "qdrant":
-                # 原地重建：旧索引挪到备份；已有备份说明上次被中断过，那份才是最后一个完整索引
+            if settings.vector_store.backend == "qdrant" or (settings.vector_store.backend == "milvus" and settings.vector_store.milvus_uri):
+                # 向量在外部服务里（Qdrant / 远程 Milvus 的 collection 跟着知识库走、不跟目录走）：原地重建，旧索引挪到备份；
+                # 已有备份说明上次被中断过，那份才是最后一个完整索引
                 self._indexes.pop(kb_id, None)
                 self._mtimes.pop(kb_id, None)
                 d, bak = self.directory(kb_id), self._backup_dir(kb_id)

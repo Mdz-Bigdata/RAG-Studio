@@ -195,10 +195,15 @@ class StorageConfig(BaseModel):
 
 
 class VectorStoreConfig(BaseModel):
-    backend: Literal["numpy", "chroma", "qdrant", "lancedb"] = "numpy"
+    backend: Literal["numpy", "chroma", "qdrant", "lancedb", "milvus"] = "numpy"
     lancedb: LanceDBConfig = LanceDBConfig()
     qdrant_url: str | None = None        # 远程 Qdrant；为空则用本地文件模式
     qdrant_path: Path | None = None      # 本地持久化路径；两者都空 = 内存模式
+    # Milvus（亿级分布式）：为空 = 每个知识库一个嵌入式 Milvus Lite 文件 <index_dir>/milvus.db；http(s):// = Standalone / 集群 / Zilliz Cloud，
+    # 每个知识库一个 collection（<collection_prefix>_<知识库目录名>）。文档级过滤下推成 doc_id in / not in 表达式。需要 pymilvus
+    milvus_uri: str | None = None
+    milvus_token: str | None = None      # 集群鉴权（user:password 或 API key）
+    milvus_db: str | None = None         # 集群上的数据库名
     collection_prefix: str = "rag_children"
     # 以下为建索引期参数（改了需要重建）：qdrant 的 HNSW 图与量化
     hnsw_m: int = 16                     # 每个节点的邻居数：越大召回越高、内存越大

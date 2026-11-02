@@ -14,7 +14,7 @@
 难负样本优化：[挖掘、审核、真实 embedding / reranker 微调与独立评测](docs/HARD_NEGATIVE_FINETUNING.md)。
 `rag mine-negatives` 从生产索引生成训练集，用重排模型剔除伪正例、简单负例与疑似漏标正例，并导出教师分供 `--distill-weight` 蒸馏，`--synthetic` 可让文本模型改写正例生成待人工筛选的负例；`python -m prism.training.finetune --dry-run ...` 可无模型预检查，安装 `.[finetune]` 后训练并保存本地权重。新 embedding 激活前需要重建向量索引。
 
-千万级知识库：[SQLite 块存储 + LanceDB jieba 全文索引 + 文档级过滤下推，批量导入与压测（1000 万段落带过滤检索 p50 72 ms）](docs/SCALING.md)。
+千万级 / 亿级知识库：[SQLite 块存储 + LanceDB jieba 全文索引 + 文档级过滤下推 + Milvus 分布式向量后端，批量导入与压测（1000 万段落带过滤检索 p50 72 ms）](docs/SCALING.md)。
 
 OKF 权威知识包：[Git 管理的 Markdown 条目（指标公式 / API 规范 / 运维手册），问题点名条目时整篇置顶、不经过向量，其余走 RAG](docs/OKF.md)。
 

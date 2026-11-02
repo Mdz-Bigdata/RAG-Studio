@@ -101,7 +101,8 @@ const GROUPS: { title: string; icon: React.ReactNode; tone: string; note?: strin
   {
     title: '向量索引（建库参数）', icon: <Layers size={14} />, tone: 'accent', reindex: true, note: '向量库后端与 Qdrant 的 HNSW 图、量化方式在建索引时确定，改了会自动重建。numpy 后端是精确暴力检索，数万条以内足够快。',
     fields: [
-      { path: 'vector_store.backend', label: '向量库后端', type: 'select', options: [['numpy', 'numpy（精确，零依赖）'], ['lancedb', 'LanceDB（嵌入式：向量 + 全文 + 版本）'], ['qdrant', 'Qdrant（HNSW 近似检索）'], ['chroma', 'Chroma']] },
+      { path: 'vector_store.backend', label: '向量库后端', type: 'select', options: [['numpy', 'numpy（精确，零依赖）'], ['lancedb', 'LanceDB（嵌入式：向量 + 全文 + 版本）'], ['milvus', 'Milvus（亿级分布式；不填地址则用嵌入式 Milvus Lite）'], ['qdrant', 'Qdrant（HNSW 近似检索）'], ['chroma', 'Chroma']] },
+      { path: 'vector_store.milvus_uri', label: 'Milvus 地址', type: 'text', placeholder: 'http://milvus:19530（留空 = 嵌入式 Milvus Lite）', hint: '留空 = 每个知识库一个嵌入式 Milvus Lite 文件；http://host:19530 连 Standalone / 集群，https://… 连 Zilliz Cloud' },
       { path: 'vector_store.lancedb.index_type', label: 'LanceDB ANN 索引', type: 'select', options: [['auto', 'auto（够量自动建 IVF_HNSW_SQ）'], ['none', '不建（始终精确扫描）'], ['IVF_HNSW_SQ', 'IVF_HNSW_SQ'], ['IVF_PQ', 'IVF_PQ（最省内存）'], ['IVF_FLAT', 'IVF_FLAT']] },
       { path: 'vector_store.lancedb.index_min_rows', label: 'LanceDB 建索引门槛（行）', type: 'num', min: 256, max: 10000000, step: 1000, hint: 'auto 时行数达到才建 ANN；之下精确扫描，召回 100%' },
       { path: 'vector_store.lancedb.fts_tokenizer', label: 'LanceDB 全文分词', type: 'select', options: [['icu', 'ICU（自带中文分词）'], ['jieba', 'jieba（与 BM25 同一套分词，千万级用）'], ['ngram', '二元组'], ['whitespace', '按空白']], hint: 'jieba：写入时切好词，全文索引替代内存 BM25（关键词路选 LanceDB 全文时生效）' },

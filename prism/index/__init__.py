@@ -88,6 +88,11 @@ class Index:
             from ..lance import LanceDBVectorStore   # 延迟导入：没装 lancedb 时其他后端照常可用
 
             return LanceDBVectorStore(self.directory / "lancedb", dim, cfg=cfg.lancedb)
+        if cfg.backend == "milvus":
+            from .milvus_store import MilvusVectorStore   # 延迟导入：没装 pymilvus 时其他后端照常可用
+
+            uri = cfg.milvus_uri or str(self.directory / "milvus.db")
+            return MilvusVectorStore(uri, dim, collection=f"{cfg.collection_prefix}_{self.directory.name}".replace("-", "_"), token=cfg.milvus_token, db_name=cfg.milvus_db)
         return NumpyVectorStore(dim=dim)
 
     def _tune_vectors(self) -> None:

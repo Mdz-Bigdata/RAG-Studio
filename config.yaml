@@ -70,9 +70,13 @@ embedding:
 
 vector_store:
   backend: numpy              # numpy（零依赖，万级以内）| lancedb（嵌入式：向量 + 全文 + 版本，pip install lancedb）| qdrant | chroma
+                              # | milvus（亿级分布式：milvus_uri 为空用嵌入式 Milvus Lite，填 http://host:19530 连集群；pip install 'pymilvus[milvus_lite]'）
                               # 改成 lancedb 后服务自动用 LanceDB 重建所有知识库；不想切换也可以在「LanceDB」页把知识库镜像进去体验
   qdrant_url: null
   qdrant_path: null
+  milvus_uri: null            # milvus：null = <index_dir>/milvus.db（嵌入式）| http://milvus:19530 | https://xxx.zillizcloud.com
+  milvus_token: null          # 集群鉴权（user:password 或 API key）
+  milvus_db: null
   lancedb:                    # 建索引期参数（改了会重建）；查询期的 nprobes / refine_factor / ef_search 在 vector_store.search
     index_type: auto          # auto（行数 ≥ index_min_rows 自动建 IVF_HNSW_SQ）| none | IVF_HNSW_SQ | IVF_PQ | IVF_FLAT
     index_min_rows: 20000     # 之下精确扫描：召回 100%，万级数据本来就够快

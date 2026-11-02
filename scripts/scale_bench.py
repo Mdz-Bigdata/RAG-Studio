@@ -36,6 +36,7 @@ TODAY = date(2026, 10, 30)
 
 
 INDEX_TYPE = "IVF_HNSW_SQ"     # build --index-type 可改；query 从 bench_build.json 读回
+BACKEND = "lancedb"            # build --backend lancedb | milvus（嵌入式 Milvus Lite；关键词路退回内存 BM25）
 
 
 def scale_settings(directory: Path):
@@ -43,10 +44,10 @@ def scale_settings(directory: Path):
 
     st = Settings.lite(index_dir=directory)
     st.storage.chunk_store = "sqlite"
-    st.vector_store.backend = "lancedb"
+    st.vector_store.backend = BACKEND
     st.vector_store.lancedb.fts_tokenizer = "jieba"
     st.vector_store.lancedb.index_type = INDEX_TYPE
-    st.retrieval.sparse_backend = "lancedb_fts"
+    st.retrieval.sparse_backend = "lancedb_fts" if BACKEND == "lancedb" else "bm25"
     return st
 
 
@@ -137,12 +138,13 @@ def pct(xs: list[float], p: float) -> float:
 
 # --------------------------------------------------------------------------------------
 def build(args) -> dict:
-    global DIM, INDEX_TYPE
+    global DIM, INDEX_TYPE, BACKEND
     from prism.index import Index
     from prism.ingest.bulk import BulkIndexer
 
     DIM = SyntheticEmbedder.dim = args.dim
     INDEX_TYPE = args.index_type
+    BACKEND = args.backend
 
     if args.dir.exists():
         shutil.rmtree(args.dir)
@@ -166,20 +168,23 @@ def build(args) -> dict:
     out = {"children": stats.children, "chunks": stats.chunks, "docs": stats.docs, "dim": DIM, "writeSeconds": round(t_write, 1),
            "indexSeconds": round(stats.seconds["indexes"], 1), "totalSeconds": round(total, 1), "childPerSecond": round(stats.children / t_write, 1),
            "phases": stats.as_dict()["seconds"], "buildPeakRssMB": round(rss_mb()), "diskGB": {"total": round(du(args.dir), 2), "lancedb": round(du(args.dir / "lancedb"), 2),
-           "sqlite": round(sum(p.stat().st_size for p in args.dir.glob("chunks.sqlite*")) / 1e9, 2)}, "ann": idx.vectors._ann_meta()}
+           "sqlite": round(sum(p.stat().st_size for p in args.dir.glob("chunks.sqlite*")) / 1e9, 2),
+           "milvus": round(sum(f.stat().st_size for p in args.dir.glob("milvus.db*") for f in ([p] if p.is_file() else p.rglob("*")) if f.is_file()) / 1e9, 2)},
+           "backend": BACKEND, "ann": idx.vectors._ann_meta() if hasattr(idx.vectors, "_ann_meta") else {}}
     print(json.dumps(out, ensure_ascii=False, indent=2))
     (args.dir / "bench_build.json").write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
     return out
 
 
 def query(args) -> dict:
-    global DIM, INDEX_TYPE
+    global DIM, INDEX_TYPE, BACKEND
     from prism.index import Index
     from prism.retrieval import HybridRetriever
 
     built = json.loads((args.dir / "bench_build.json").read_text(encoding="utf-8"))
     DIM = SyntheticEmbedder.dim = built["dim"]
-    INDEX_TYPE = built["ann"]["index_type"]
+    INDEX_TYPE = (built.get("ann") or {}).get("index_type") or INDEX_TYPE
+    BACKEND = built.get("backend") or "lancedb"
 
     st = scale_settings(args.dir)
     st.vector_store.search.nprobes_ratio = args.nprobes_ratio
@@ -234,7 +239,8 @@ def query(args) -> dict:
     sparse_hit = sum(p[0] in {x for x, _ in idx.bm25.search(p[2], 10)} for p in probes) / len(probes)
     out = {"children": len(idx.vectors), "docs": n_docs, "loadSeconds": round(t_load, 2), "firstQuerySeconds": round(t_first, 2),
            "rssMB": {"beforeLoad": round(rss0), "afterLoadAndFirstQuery": round(rss_loaded), "afterQueries": round(rss_queries), "afterExactScans": round(rss_mb())},
-           "scope": repr(scope), "nprobes": idx.vectors._probes(), "nprobesRatio": args.nprobes_ratio, "partitions": idx.vectors._ann_meta().get("partitions"),
+           "scope": repr(scope), "backend": BACKEND, "nprobes": idx.vectors._probes() if hasattr(idx.vectors, "_probes") else None, "nprobesRatio": args.nprobes_ratio,
+           "partitions": idx.vectors._ann_meta().get("partitions") if hasattr(idx.vectors, "_ann_meta") else None,
            "latencyMs": {k: {"p50": pct(v, 0.5), "p95": pct(v, 0.95)} for k, v in
                          {"dense": dense, "dense+filter": dense_f, "sparse": sparse, "sparse+filter": sparse_f, "hybridRetrieve": full}.items()},
            "recallAt10": round(float(np.mean(rec)), 3), "denseFindsSource@10": round(hit_self / len(rec), 3), "sparseFindsSource@10": round(sparse_hit, 3)}
@@ -254,6 +260,7 @@ def main() -> None:
     b.add_argument("--workers", type=int, default=8, help="jieba 分词进程数")
     b.add_argument("--dim", type=int, default=1024)
     b.add_argument("--index-type", default="IVF_HNSW_SQ", choices=["IVF_HNSW_SQ", "IVF_PQ", "IVF_FLAT"])
+    b.add_argument("--backend", default="lancedb", choices=["lancedb", "milvus"])
     b.add_argument("--min-free-gb", type=float, default=25, help="磁盘剩余低于它就中止（建索引还要临时空间）")
     q = sub.add_parser("query")
     q.add_argument("--dir", type=Path, required=True)

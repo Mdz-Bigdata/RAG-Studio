@@ -425,3 +425,19 @@ def test_document_page_endpoint(tmp_path: Path):
             assert len(c.get(f"/api/v1/documents/page?kbId={kb}&limit=9999").json()["items"]) == 250   # limit 封顶 500，这里只有 250 篇
     finally:
         cfg.data_dir, cfg.upload_dir, cfg.index_root = saved
+
+
+def test_bm25_scope_mask_matches_membership():
+    """内存 BM25 对文档级范围用 numpy 算掩码：结果与逐段落 `cid in scope` 一致。"""
+    from prism.config import SparseConfig
+    from prism.index import BM25Store
+
+    st = BM25Store(SparseConfig(use_jieba=False))
+    ids = [f"d{i % 7}:p{i:04d}:c000" for i in range(300)]
+    st.add(ids, [f"段落 {i} 关于年假与报销" for i in range(300)])
+    for scope in (ChunkScope(include=frozenset(["d1", "d3"])), ChunkScope(exclude=frozenset(["d0"])), ChunkScope.of_docs([], ["d0"]), ChunkScope()):
+        got = {cid for cid, _ in st.search("年假", 300, scope)}
+        want = {cid for cid in ids if cid in scope}
+        assert got == want, scope
+    st.remove({ids[0]})
+    assert ids[0] not in {cid for cid, _ in st.search("年假", 300, ChunkScope(include=frozenset(["d0"])))}

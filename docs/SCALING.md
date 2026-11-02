@@ -15,6 +15,8 @@
 | 自查询（元数据条件） | 每次查询遍历全部文档统计取值 | O(文档数)/次 | 按范围缓存 |
 | 文档元数据的过滤与统计 | 逐篇拿 `DocMetadata` 判断（Python 循环） | 100 万篇：过滤一遍 0.2 s、统计取值 1.5 s，对象占 1.8 GB；亿级约 500 万篇 | `DocIndex` 列式索引（numpy）：100 万篇过滤 1 ms、按条件匹配 22 ms、统计取值 48 ms，索引约 200 MB；语义与逐篇判断逐项对拍（tests/test_doc_index.py） |
 | 「知识库」页文档列表 | 一次返回全部文档行（含正文） | 几十万篇时页面卡死 | `/documents/page` 分页 + 按文件名 / 标题搜索；轮询按整库"处理中"计数，不再扫全列表 |
+| 实体织网（`unweaver_enabled` 默认开） | 每条上下文对全部实体关系做子串匹配 | 关系几万 ~ 几十万条时每次查询多出几十毫秒：20 万条 × 5 条上下文 36 ms | 关系表按实体名建索引，枚举正文子串查表：0.2 ms，不随关系数增长；语义与逐条匹配逐项对拍（tests/test_entity_index.py） |
+| 向量后端 | numpy / LanceDB / Qdrant / Chroma，都在一台机器上 | 亿级索引放不进一台机器 | 新增 **Milvus** 后端：嵌入式 Milvus Lite（无服务）或 Standalone / 集群 / Zilliz Cloud，文档级过滤下推成 `doc_id in / not in` 表达式 |
 
 批量导入还踩到过一个坑，已修：批次够大时导入结束不合并碎片，但随后保存索引时"写入满 `optimize_every` 次自动合并"仍会触发，
 整表重写一遍、旧版本按天保留，千万级实测 LanceDB 从约 30 GB 涨到 69 GB、把压测机器的磁盘写满。现在批量导入结束时不会再触发这次合并；
@@ -140,17 +142,40 @@ IVF_PQ 把 1024 维压成 64 字节，索引小约 9 倍、内存省一半多，
 建议按业务拆成多个知识库（跨库路由已有），或把向量 / 全文换成外部服务（见下）。文档元数据这一侧不再是瓶颈：500 万篇文档的列式索引约 1 GB，
 过滤与统计都在百毫秒内。
 
-## 接外部服务
+## 接外部服务：Milvus（向量）
 
-向量存储是可插拔的（`NumpyVectorStore` / `LanceDBVectorStore` / `QdrantVectorStore` / `ChromaVectorStore` 同一接口：add / search / remove / save），
-检索范围 `ChunkScope` 能直接生成 SQL 条件（`sql("doc_id")`）。接 Milvus / Elasticsearch 只需新增一个后端类：写入时带上 `doc_id` 字段，
-`search` 里把 `ChunkScope` 翻译成对方的过滤表达式（Milvus `doc_id in [...]`、ES `terms`）。这一轮没有实现具体的外部后端。
+```yaml
+vector_store:
+  backend: milvus
+  milvus_uri: http://milvus:19530     # 留空 = 每个知识库一个嵌入式 Milvus Lite 文件 <index_dir>/milvus.db；https://… 连 Zilliz Cloud
+  milvus_token: user:password          # 集群鉴权，可空
+```
+
+安装：`pip install 'pymilvus[milvus_lite]'`（嵌入式）或 `pip install pymilvus`（只连集群）；项目 extras：`rag-agent-studio[milvus]`。
+
+- 每个知识库一个 collection（`<collection_prefix>_<知识库目录名>`），列 id / doc_id / vector，索引 AUTOINDEX（集群上由服务端选 HNSW / DiskANN），余弦度量；
+- 时效 / 权限 / 元数据过滤（`ChunkScope`）下推成 `doc_id in [...]` / `doc_id not in [...]`，先过滤再找最近邻；整篇删除 `doc_id == "..."` 一条语句；
+- 远程 Milvus 的 collection 跟着知识库走、不跟目录走：整库重建改为原地重建（与 Qdrant 同一套：旧索引挪到备份，建好替换）；
+- Milvus 不存正文：关键词路仍是内存 BM25 或 LanceDB 全文（`vector_store.backend: milvus` 时只能用 BM25）。**亿级的全文检索建议接 Elasticsearch / OpenSearch**，
+  本轮没有实现——接法与 Milvus 相同：`search(query, top_n, allowed_ids)` 接口 + 把 `ChunkScope` 翻译成 `terms` / `must_not` 过滤。
+
+实测（嵌入式 Milvus Lite，30 万段落 × 256 维，同一台 Mac）：导入 3,474 child/s，向量 p50 76 ms（LanceDB 同机 100 万条才 10 ms），
+带过滤的完整检索 p50 181 ms，recall@10 1.0，常驻内存 3.6 GB。**Milvus Lite 只适合开发和测试**——它把数据全装进内存、查询也慢；
+后端的意义在于连 Milvus 集群，把亿级索引分散到多台机器上。集群上的延迟取决于部署，这里没有实测。
+
+两个注意事项：
+- `milvus_lite` 的原生库一旦载入进程，同一进程里再跑 onnxruntime（rapidocr OCR）会段错误（本项目测试实测复现）。
+  所以 Milvus 的测试默认跳过，`RAG_TEST_MILVUS=1 pytest tests/test_milvus.py` 单独跑；生产上用服务端 Milvus（pymilvus 客户端本身没有这个问题）。
+- 新进程打开已有 collection 时它处于 released 状态，后端会自动 `load_collection`；集群上首次 load 要把索引读进内存，大 collection 需要几分钟。
+
+其他后端同样可插拔：`NumpyVectorStore` / `LanceDBVectorStore` / `QdrantVectorStore` / `ChromaVectorStore` / `MilvusVectorStore` 同一接口
+（add / search / remove / remove_doc / get_vectors / save）。
 
 ## 已知限制
 
 - `GET /documents/?kbId=` 仍一次返回全部文档（脚本 / 旧调用方用）；界面已改用分页接口。
 - **全库分析类功能仍然遍历全库**：语料体检、别名发现、个性化推荐、LanceDB 镜像、覆盖率评测（检索链路之外，跑得动但慢、占内存）。
 - **辅助索引（摘要 / 分层）与图片索引的 BM25 仍在内存**；批量导入不处理文档里的图片。
-- **实体图（EntityStore）在内存**，只是不再每次整份重写。
+- **实体图（EntityStore）在内存**（已按实体名建索引，查询不再扫全表），只是没有下盘；LLM 抽取的三元组很密时 entities.json 会大。
 - `--rebuild` 期间网页上对这个知识库的写入不会进新索引。
 - 当前阿里云服务器（2 核 4 GB）放不下千万级：按上表至少需要 32 GB 内存、200 GB 以上 SSD 的机器。

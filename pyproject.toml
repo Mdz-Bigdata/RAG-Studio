@@ -54,6 +54,7 @@ chroma = ["chromadb>=0.5"]
 lake = ["lancedb>=0.39", "duckdb>=1.1", "pandas>=2.0"]
 # LanceDB：知识库向量后端 / 长期记忆 / 个性化推荐 / 多智能体黑板 / 多模态表
 lancedb = ["lancedb>=0.39"]
+milvus = ["pymilvus[milvus_lite]>=2.5"]
 dev = ["pytest>=8.0", "pytest-cov"]
 all = ["rag-agent-studio[models,multimodal,mineru,qdrant,chroma,lake,lancedb,dev]"]
 
