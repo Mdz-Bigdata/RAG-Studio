@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BadgeCheck, AlertCircle, Check, Database, History, FileText, Layers, List as ListIcon, Loader2, Network, Share2, Pencil, Plus, RefreshCw, RotateCw, ScanText, Search, Tags, Trash2, TreePine, Upload, X } from 'lucide-react';
 import { api } from '../api/client';
-import type { OKFImportResult, OKFStatus, ChunkView, Document, EditBackup, EntityRelation, KbGraph, KnowledgeBase, ParsingInfo, PopoStatus } from '../api/types';
+import type { OKFAutoSync, OKFImportResult, OKFStatus, ChunkView, Document, EditBackup, EntityRelation, KbGraph, KnowledgeBase, ParsingInfo, PopoStatus } from '../api/types';
 import { Badge, Button, Callout, Drawer, Empty, Field, Modal, Spinner, Tabs, confirmDialog } from '../components/ui';
 import { EntityGraph } from '../components/entity-graph';
 import { STATUS_LABEL, formatBytes, formatDate } from '../lib/format';
@@ -198,8 +198,12 @@ function OKFModal({ kbId, status, onClose, onChanged }: { kbId: string; status: 
   const [source, setSource] = useState(status?.source ?? '');
   const [ref, setRef] = useState(status?.ref ?? '');
   const [subdir, setSubdir] = useState(status?.subdir ?? '');
-  const [busy, setBusy] = useState<'import' | 'sync' | 'forget' | null>(null);
+  const [busy, setBusy] = useState<'import' | 'sync' | 'forget' | 'auto' | null>(null);
   const [result, setResult] = useState<OKFImportResult | null>(null);
+  const [auto, setAuto] = useState<OKFAutoSync | null>(null);
+  useEffect(() => { api.okf.autoSync().then(setAuto).catch(() => setAuto(null)); }, []);
+  const setMinutes = async (m: number) => { try { setAuto(await api.okf.setAutoSync(m)); toast(m ? `每 ${m} 分钟检查一次远端提交` : '已关闭自动同步', 'ok'); } catch (e) { toast(errMsg(e), 'bad'); } };
+  const runAuto = async () => { setBusy('auto'); try { await api.okf.runAutoSync(); setAuto(await api.okf.autoSync()); onChanged(await api.okf.status(kbId)); toast('已检查远端提交', 'ok'); } catch (e) { toast(errMsg(e), 'bad'); } finally { setBusy(null); } };
   const run = async (kind: 'import' | 'sync') => {
     setBusy(kind);
     try {
@@ -226,6 +230,16 @@ function OKFModal({ kbId, status, onClose, onChanged }: { kbId: string; status: 
         </div>
         {status?.source ? <div className="xs muted">当前：{status.source}{status.ref ? ` @${status.ref}` : ''}{status.subdir ? ` /${status.subdir}` : ''} · {status.count} 个条目{status.commit ? ` · 提交 ${status.commit.slice(0, 8)}` : ''}{status.syncedAt ? ` · 同步于 ${status.syncedAt.slice(0, 19).replace('T', ' ')}` : ''}</div> : null}
         {result?.failed.length ? <Callout tone="warn">{result.failed.map((f, i) => <div key={i}>{f}</div>)}</Callout> : null}
+        {status?.isGit ? (
+          <div className="row gap-8 wrap small" title="后台定时 git ls-remote 比远端提交号，变了才重新导入；所有 Git 来源的知识库共用这个间隔">
+            <span className="muted">自动同步</span>
+            <select value={auto?.minutes ?? 0} onChange={(e) => setMinutes(Number(e.target.value))} style={{ padding: '3px 6px', fontSize: 12 }}>
+              {[[0, '关闭'], [5, '每 5 分钟'], [15, '每 15 分钟'], [60, '每小时'], [360, '每 6 小时'], [1440, '每天']].map(([m, l]) => <option key={m} value={m}>{l}</option>)}
+            </select>
+            <Button type="button" size="xs" loading={busy === 'auto'} disabled={!!busy} onClick={runAuto}>立刻检查</Button>
+            {auto?.last ? <span className="xs faint">上次 {auto.last.at.slice(0, 19).replace('T', ' ')}：检查 {auto.last.checked}，重新导入 {auto.last.updated}{auto.last.errors.length ? `，错误 ${auto.last.errors.length}` : ''}</span> : null}
+          </div>
+        ) : null}
         {status?.entries.length ? (
           <div className="col gap-4" style={{ maxHeight: 260, overflowY: 'auto' }}>
             {status.entries.map((e) => <div key={e.docId} className="row gap-8 small"><Badge tone="ok"><BadgeCheck size={10} />{e.type || 'entry'}</Badge><span className="ellipsis">{e.title}</span>{e.owner ? <span className="xs faint">· {e.owner}</span> : null}</div>)}

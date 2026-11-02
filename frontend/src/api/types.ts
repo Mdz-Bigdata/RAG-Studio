@@ -31,6 +31,12 @@ export interface OKFStatus {
   entries: { docId: string; sha1: string; title: string; type: string; owner: string }[];
 }
 
+export interface OKFAutoSync {
+  minutes: number;                 // 0 = 关闭
+  running: boolean;
+  last: { at: string; kbs: number; checked: number; updated: number; unchanged: number; errors: string[] } | null;
+}
+
 export interface OKFImportResult {
   created: number;
   updated: number;

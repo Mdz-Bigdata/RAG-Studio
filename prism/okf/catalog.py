@@ -42,6 +42,20 @@ class OKFCatalog:
     def __len__(self) -> int:
         return len(self.entries)
 
+    def doc_ids(self) -> frozenset[str]:
+        return frozenset(d for d, *_ in self.entries)
+
+    def related(self, doc_id: str) -> list[str]:
+        """条目正文里 Related 链到的其他条目（按链接的文件名找，一跳）。"""
+        by_stem = {str(okf.get("path") or "").rsplit("/", 1)[-1].rsplit(".", 1)[0].casefold(): d for d, _t, okf, _n in self.entries}
+        me = next((okf for d, _t, okf, _n in self.entries if d == doc_id), None)
+        out: list[str] = []
+        for stem in (me or {}).get("related") or []:
+            d = by_stem.get(str(stem).casefold())
+            if d and d != doc_id and d not in out:
+                out.append(d)
+        return out
+
     @staticmethod
     def _hit(name: str, query: str) -> bool:
         n = name.casefold()

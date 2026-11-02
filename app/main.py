@@ -39,10 +39,13 @@ async def lifespan(_: FastAPI):
     threading.Thread(target=model_service.warmup, name="model-warmup", daemon=True).start()
     # 飞书文档定时同步（间隔在「飞书文档」页配置，0 = 关闭）
     from .services.feishu_service import feishu_service
+    from .services.okf_service import okf_service
 
     feishu_service.start_auto_sync()
+    okf_service.start_auto_sync()
     yield
     feishu_service.stop_auto_sync()
+    okf_service.stop_auto_sync()
 
 
 app = FastAPI(

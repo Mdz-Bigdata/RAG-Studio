@@ -1,5 +1,5 @@
 // 后端 API 客户端。开发态通过 Vite 代理 `/api` → FastAPI（VITE_API_TARGET，默认 http://localhost:8000）；生产态由 FastAPI 静态托管。
-import type { AliasSuggestion, AugmentState, FaqStatus, HealthReport, MetaField, MetaRow, MineruConnectionTest, ChatMessage, ChatPlan, ChatSession, ChatSource, ChunkView, CoverageReport, Document, DocumentPage, OKFImportResult, OKFStatus, EntityRelation, EvalExample, EvalReport, ImageHitView, ImageView, KnowledgeBase, MultimodalEvalReport, MineruTiersInfo, ModelConfig, MultimodalMode, MultimodalResponse, MultimodalStatus, SimilarResponse, DuplicatesResponse, ParsingInfo, PopoStatus, EditBackup, PresetsPayload, ProviderPreset, RetrievalMode, RetrievalOverrides, RetrievalResponse, RouteResult, RuntimeInfo, SettingsPayload, SystemStatus, WeavedRelation, ReindexStatus, UserIdentity, VectorBenchmark, KbGraph } from './types';
+import type { AliasSuggestion, AugmentState, FaqStatus, HealthReport, MetaField, MetaRow, MineruConnectionTest, ChatMessage, ChatPlan, ChatSession, ChatSource, ChunkView, CoverageReport, Document, DocumentPage, OKFAutoSync, OKFImportResult, OKFStatus, EntityRelation, EvalExample, EvalReport, ImageHitView, ImageView, KnowledgeBase, MultimodalEvalReport, MineruTiersInfo, ModelConfig, MultimodalMode, MultimodalResponse, MultimodalStatus, SimilarResponse, DuplicatesResponse, ParsingInfo, PopoStatus, EditBackup, PresetsPayload, ProviderPreset, RetrievalMode, RetrievalOverrides, RetrievalResponse, RouteResult, RuntimeInfo, SettingsPayload, SystemStatus, WeavedRelation, ReindexStatus, UserIdentity, VectorBenchmark, KbGraph } from './types';
 import type { HardNegativeMiningConfig, HardNegativeReport, MetadataFacets } from './types';
 
 export const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? '/api/v1';
@@ -59,6 +59,9 @@ export const api = {
     sync: (kbId: string) => request<OKFImportResult>(`/okf/${kbId}/sync`, { method: 'POST' }),
     match: (kbId: string, q: string) => request<{ doc_id: string; title: string; matched: string; type: string; owner: string }[]>(`/okf/${kbId}/match?q=${encodeURIComponent(q)}`),
     forget: (kbId: string, deleteDocs = true) => request<{ removed: number }>(`/okf/${kbId}?deleteDocs=${deleteDocs}`, { method: 'DELETE' }),
+    autoSync: () => request<OKFAutoSync>('/okf/auto-sync'),
+    setAutoSync: (minutes: number) => request<OKFAutoSync>('/okf/auto-sync', put({ minutes })),
+    runAutoSync: () => request<OKFAutoSync['last']>('/okf/auto-sync/run', { method: 'POST' }),
   },
   documents: {
     supportedFormats: () => request<{ extensions: string[]; mineru: boolean }>('/documents/supported-formats'),

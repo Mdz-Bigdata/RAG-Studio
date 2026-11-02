@@ -33,7 +33,7 @@ from ..config import RetrievalConfig, Settings
 from ..generation.llm import BaseLLM
 from ..graph.unweaver import weave_contexts
 from ..index import Index
-from ..index.scope import ChunkScope
+from ..index.scope import ChunkScope, doc_prefix
 from ..okf import OKFCatalog
 from ..ingest.chunking.tokenizer import count_tokens
 from ..schemas import Chunk, Context, DocMetadata, RetrievalResult, RetrievalTrace, ScoredChunk
@@ -184,6 +184,7 @@ class HybridRetriever:
         if pinned:
             seen = {c.chunk.chunk_id for c in pinned}
             contexts = pinned + [c for c in contexts if c.chunk.chunk_id not in seen]
+        contexts = self._mark_okf(contexts, cfg)
         if self._sql_aggregate is not None:
             # 聚合类 SQL（COUNT / AVG …）没有对应的行：把结果表作为一条上下文放在最前面
             contexts.insert(0, self._sql_aggregate)
@@ -380,35 +381,62 @@ class HybridRetriever:
         return hit
 
     def _okf_pin(self, query: str, allowed: set[str] | ChunkScope | None, cfg: RetrievalConfig, trace: RetrievalTrace) -> list[Context]:
-        """问题点名的 OKF 条目 → 该条目的段落（按原文顺序，整篇给，最多 max_parents 段），score 1.0、authority="okf"。"""
+        """问题点名的 OKF 条目 → 该条目的段落（按原文顺序，整篇给，最多 max_parents 段），score 1.0、authority="okf"。
+        条目正文里 Related 链到的其他条目跟在后面一起置顶（一跳，占 max_pinned 的名额）：公式条目通常链着它引用的指标 / 表定义。"""
         if not cfg.okf.enabled:
             return []
         catalog = self._okf_catalog()
         if not len(catalog):
             return []
         store = self.index.store
-        if allowed is None:
-            allowed_doc = None
-        elif isinstance(allowed, ChunkScope):
-            allowed_doc = allowed.allows_doc
-        else:
-            visible = {store.doc_of(c) for c in allowed}
-            allowed_doc = visible.__contains__
-        out: list[Context] = []
+        allowed_doc = self._allowed_doc(allowed)
+        picked: list[tuple[str, str, str]] = []      # (doc_id, 标题, 命中方式)
         for m in catalog.match(query, limit=cfg.okf.max_pinned, allowed_doc=allowed_doc):
-            md = store.docs.get(m.doc_id)
-            okf = md.extra.get("okf") if md is not None else None
-            parents = store.chunks_of_doc(m.doc_id, "parent")[: cfg.okf.max_parents]
+            picked.append((m.doc_id, m.title, m.matched))
+            for rel in catalog.related(m.doc_id):
+                if len(picked) >= cfg.okf.max_pinned:
+                    break
+                if rel not in {d for d, *_ in picked} and (allowed_doc is None or allowed_doc(rel)):
+                    picked.append((rel, (store.docs.get(rel).title if store.docs.get(rel) else rel) or rel, f"related:{m.title}"))
+        out: list[Context] = []
+        for doc_id, title, matched in picked[: cfg.okf.max_pinned]:
+            parents = store.chunks_of_doc(doc_id, "parent")[: cfg.okf.max_parents]
             if not parents:
                 continue
-            for p in parents:
-                meta = {**p.metadata, "okf": okf} if isinstance(okf, dict) else p.metadata
-                out.append(Context(chunk=p.model_copy(update={"metadata": meta}), score=1.0, matched_child_ids=list(p.child_ids), authority="okf"))
-            trace.okf.append({"doc_id": m.doc_id, "title": m.title, "matched": m.matched, "type": m.type, "owner": m.owner, "chunks": len(parents)})
+            out.extend(self._okf_context(p, score=1.0) for p in parents)
+            okf = store.docs[doc_id].extra.get("okf") if doc_id in store.docs else {}
+            trace.okf.append({"doc_id": doc_id, "title": title, "matched": matched, "type": str((okf or {}).get("type") or ""), "owner": str((okf or {}).get("owner") or ""), "chunks": len(parents)})
         if out:
-            names = "、".join(f"《{x['title']}》" for x in trace.okf)
-            trace.notes.append(f"OKF 权威条目命中：问题提到了 {names}，条目整篇置顶（确定性路由，不走向量）；其余资料为 RAG 检索结果")
+            named = [x for x in trace.okf if not x["matched"].startswith("related:")]
+            linked = [x for x in trace.okf if x["matched"].startswith("related:")]
+            titles = lambda xs: "、".join("《" + x["title"] + "》" for x in xs)   # noqa: E731
+            note = f"OKF 权威条目命中：问题提到了 {titles(named)}，条目整篇置顶（确定性路由，不走向量）"
+            if linked:
+                note += f"；一并带上它链接的 {titles(linked)}"
+            trace.notes.append(note + "；其余资料为 RAG 检索结果")
         return out
+
+    def _okf_context(self, chunk: Chunk, *, score: float, matched_child_ids: list[str] | None = None) -> Context:
+        okf = self.index.store.docs[chunk.doc_id].extra.get("okf") if chunk.doc_id in self.index.store.docs else None
+        meta = {**chunk.metadata, "okf": okf} if isinstance(okf, dict) else chunk.metadata
+        return Context(chunk=chunk.model_copy(update={"metadata": meta}), score=score, matched_child_ids=list(chunk.child_ids) if matched_child_ids is None else matched_child_ids, authority="okf")
+
+    def _mark_okf(self, contexts: list[Context], cfg: RetrievalConfig) -> list[Context]:
+        """RAG 召回到的段落属于 OKF 条目时同样标为权威：权威是来源的属性，不取决于是被点名还是被向量找到。排序不变。"""
+        if not cfg.okf.enabled or not len(self._okf_catalog()):
+            return contexts
+        okf_docs = self._okf_catalog().doc_ids()
+        return [self._okf_context(c.chunk, score=c.score, matched_child_ids=c.matched_child_ids).model_copy(update={"weaved": c.weaved, "weaved_entity": c.weaved_entity, "compressed_text": c.compressed_text})
+                if c.authority is None and c.chunk.doc_id in okf_docs else c for c in contexts]
+
+    @staticmethod
+    def _allowed_doc(allowed: set[str] | ChunkScope | None):
+        if allowed is None:
+            return None
+        if isinstance(allowed, ChunkScope):
+            return allowed.allows_doc
+        docs = {doc_prefix(c) for c in allowed}
+        return docs.__contains__
 
     def _history_intent(self, query: str, on_date: date | None) -> str | None:
         """temporal.history_intent 的列式版：说法直接匹配；年份在列式索引上判断是否落在已失效文档里。"""

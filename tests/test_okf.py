@@ -126,9 +126,19 @@ def test_retrieval_pins_named_entry(okf_index):
 
     text = format_context(top)
     assert "【权威条目（OKF）】" in text and "负责人：data-engineering" in text and "更新：2026-06-20" in text
+    # 条目正文 Related 链到的《月活跃用户》一并置顶（占 max_pinned 名额），链路说明写明
+    assert [x["title"] for x in res.trace.okf] == ["Monthly Churn Rate", "月活跃用户"] and res.trace.okf[1]["matched"] == "related:Monthly Churn Rate"
+    assert any("一并带上它链接的 《月活跃用户》" in n for n in res.trace.notes)
+    assert all(c.authority == "okf" for c in res.contexts if c.chunk.doc_id in {x["doc_id"] for x in res.trace.okf})
+    only_one = r.retrieve("月流失率怎么算", top_k=3, overrides={"okf": {"max_pinned": 1}})
+    assert [x["title"] for x in only_one.trace.okf] == ["Monthly Churn Rate"]
     # 没点名条目：不置顶，照常 RAG
     plain = r.retrieve("年假可以跨年使用吗", top_k=3)
     assert plain.contexts and all(c.authority is None for c in plain.contexts) and not plain.trace.okf
+    # 没点名但 RAG 召回到了条目的段落：同样标为权威（权威是来源的属性），但不置顶、不进 trace.okf
+    recalled = r.retrieve("trial accounts denominator board reports", top_k=3)
+    hit = [c for c in recalled.contexts if "trial accounts" in c.chunk.text]
+    assert hit and hit[0].authority == "okf" and hit[0].chunk.metadata["okf"]["owner"] == "data-engineering" and not recalled.trace.okf
     # 关闭开关
     off = r.retrieve("月流失率怎么算", top_k=3, overrides={"okf": {"enabled": False}})
     assert all(c.authority is None for c in off.contexts)
@@ -186,9 +196,30 @@ def test_import_from_git_repo_sync_and_remove(tmp_path: Path):
             assert c.get(f"/api/v1/okf/{kb}/match?q=月流失率").json() == []
             res = c.post(f"/api/v1/retrieval/{kb}/playground", json={"query": "MAU 口径是什么"}).json()
             assert res["contexts"][0]["authority"] == "okf" and "机器人账号" in res["contexts"][0]["text"]
+            # 自动同步：远端提交没变就跳过；仓库再提交一次后一轮同步就重新导入
+            from app.services.okf_service import okf_service
+
+            assert c.get("/api/v1/okf/auto-sync").json()["minutes"] == 0
+            assert c.put("/api/v1/okf/auto-sync", json={"minutes": 15}).json()["minutes"] == 15
+            round1 = c.post("/api/v1/okf/auto-sync/run").json()
+            assert (round1["kbs"], round1["checked"], round1["unchanged"], round1["updated"]) == (1, 1, 1, 0)
+            # 登记表丢了（加登记表之前导入的知识库）：按磁盘上的清单照样轮询
+            from app.db import Repository, SessionLocal
+
+            with SessionLocal() as db:
+                Repository(db).set_setting("okf:kbs", [])
+            assert c.post("/api/v1/okf/auto-sync/run").json()["checked"] == 1
+            (repo / "metrics" / "mau.md").write_text(MAU.replace("去重账号数", "去重账号数（自动同步）"), encoding="utf-8")
+            _git(["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-am", "auto"], repo)
+            assert okf_service.remote_commit(str(repo) + "/.git", "main") == _git(["rev-parse", "HEAD"], repo).strip()
+            round2 = c.post("/api/v1/okf/auto-sync/run").json()
+            assert (round2["checked"], round2["updated"], round2["errors"]) == (1, 1, [])
+            assert "自动同步" in c.post(f"/api/v1/retrieval/{kb}/playground", json={"query": "MAU 口径是什么"}).json()["contexts"][0]["text"]
+            c.put("/api/v1/okf/auto-sync", json={"minutes": 0})
             # 取消关联：条目文档删除
             assert c.delete(f"/api/v1/okf/{kb}").json()["removed"] == 1
             assert c.get(f"/api/v1/documents/?kbId={kb}").json() == [] and c.get(f"/api/v1/okf/{kb}").json()["count"] == 0
+            assert c.post("/api/v1/okf/auto-sync/run").json()["kbs"] == 0            # 取消关联后不再轮询它
             # 坏来源
             assert c.post(f"/api/v1/okf/{kb}/import", json={"source": str(tmp_path / "nope")}).status_code == 400
     finally:

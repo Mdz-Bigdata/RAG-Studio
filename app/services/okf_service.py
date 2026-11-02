@@ -14,6 +14,8 @@ import json
 import logging
 import re
 import subprocess
+import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,7 +50,20 @@ def _git(args: list[str], cwd: Path | None = None, timeout: int = 600) -> str:
     return r.stdout
 
 
+_KBS_KEY = "okf:kbs"              # 导入过 OKF 知识包的知识库列表（自动同步按它轮询）
+_AUTO_KEY = "okf:auto_sync"        # {"minutes": N}：0 = 关闭
+
+
 class OKFService:
+    auto_sync_tick = 30.0            # 后台线程每隔多少秒看一次配置
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._sync_lock = threading.Lock()
+        self._auto_thread: threading.Thread | None = None
+        self._auto_stop = threading.Event()
+        self._auto_last: dict[str, Any] | None = None
+
     def root(self, kb_id: str) -> Path:
         return app_config.data_dir / "okf" / kb_id
 
@@ -135,6 +150,7 @@ class OKFService:
                     counts["updated"] += 1
                 changed.append(doc_id)
             repo.set_setting(self._setting_key(kb_id), {"source": source.strip(), "ref": ref or None, "subdir": subdir or None})
+            repo.set_setting(_KBS_KEY, sorted({*(repo.get_setting(_KBS_KEY) or []), kb_id}))
         for path, info in old.items():
             if path not in new_entries:
                 try:
@@ -183,10 +199,110 @@ class OKFService:
                 except KeyError:
                     pass
         with SessionLocal() as db:
-            Repository(db).set_setting(self._setting_key(kb_id), None)
+            repo = Repository(db)
+            repo.set_setting(self._setting_key(kb_id), None)
+            repo.set_setting(_KBS_KEY, [k for k in (repo.get_setting(_KBS_KEY) or []) if k != kb_id])
         p = self._manifest_path(kb_id)
         p.unlink(missing_ok=True)
         return {"removed": removed}
+
+
+    # --- 自动同步（Git 来源）------------------------------------------------------------
+    def auto_sync_settings(self) -> dict[str, Any]:
+        with SessionLocal() as db:
+            cfg = Repository(db).get_setting(_AUTO_KEY) or {}
+        return {"minutes": int(cfg.get("minutes") or 0), "running": self.auto_sync_running(), "last": self._auto_last}
+
+    def update_auto_sync(self, minutes: int) -> dict[str, Any]:
+        minutes = max(0, min(1440, int(minutes)))
+        with SessionLocal() as db:
+            Repository(db).set_setting(_AUTO_KEY, {"minutes": minutes})
+        return self.auto_sync_settings()
+
+    def start_auto_sync(self) -> None:
+        """应用启动时调用：后台线程按 okf:auto_sync.minutes 定时检查远端提交（0 = 关闭，线程照跑、只看配置）。"""
+        with self._lock:
+            if self.auto_sync_running():
+                return
+            self._auto_stop = threading.Event()
+            self._auto_thread = threading.Thread(target=self._auto_sync_loop, args=(self._auto_stop,), name="okf-auto-sync", daemon=True)
+            self._auto_thread.start()
+
+    def stop_auto_sync(self) -> None:
+        self._auto_stop.set()
+
+    def auto_sync_running(self) -> bool:
+        return self._auto_thread is not None and self._auto_thread.is_alive() and not self._auto_stop.is_set()
+
+    def _auto_sync_loop(self, stop: threading.Event) -> None:
+        last: float | None = None
+        while not stop.wait(self.auto_sync_tick):
+            try:
+                minutes = self.auto_sync_settings()["minutes"]
+                if minutes <= 0:
+                    last = None
+                    continue
+                if last is not None and time.monotonic() - last < minutes * 60:
+                    continue
+                last = time.monotonic()
+                self.auto_sync_round()
+            except Exception:
+                logger.exception("OKF 自动同步出错")
+
+    @staticmethod
+    def remote_commit(source: str, ref: str | None) -> str | None:
+        """远端分支 / 标签当前的提交号（git ls-remote，不下载内容）；拿不到返回 None。"""
+        try:
+            out = _git(["ls-remote", source, ref or "HEAD"], timeout=120)
+        except ValueError as exc:
+            logger.warning("OKF：查询远端提交失败 %s：%s", source, exc)
+            return None
+        for line in out.splitlines():
+            sha, _, name = line.partition("\t")
+            if ref is None or name in (f"refs/heads/{ref}", f"refs/tags/{ref}", ref):
+                return sha.strip() or None
+        return None
+
+    def auto_sync_round(self) -> dict[str, Any] | None:
+        """同步一轮：Git 来源的知识库先比远端提交号，和上次导入的不同才重新导入（本地目录来源不参与自动同步）。"""
+        if not self._sync_lock.acquire(blocking=False):
+            logger.info("OKF 自动同步：上一轮还没结束，跳过")
+            return None
+        try:
+            with SessionLocal() as db:
+                registered = set(Repository(db).get_setting(_KBS_KEY) or [])
+            # 登记表之外再按磁盘上的清单找一遍：登记表是后加的，之前导入过的知识库不在里面；清单有、来源也在，就该轮询
+            on_disk = {p.parent.name for p in (app_config.data_dir / "okf").glob("*/manifest.json")}
+            kb_ids = sorted(registered | on_disk)
+            started = datetime.now(timezone.utc)
+            out: dict[str, Any] = {"kbs": 0, "checked": 0, "updated": 0, "unchanged": 0, "errors": []}
+            for kb_id in kb_ids:
+                src = self.source_of(kb_id)
+                if not src or not is_git_source(src["source"]):
+                    continue
+                out["kbs"] += 1
+                remote = self.remote_commit(src["source"], src.get("ref"))
+                if remote is None:
+                    out["errors"].append(f"{kb_id}: 查不到远端提交")
+                    continue
+                out["checked"] += 1
+                if remote == self.manifest(kb_id).get("commit"):
+                    out["unchanged"] += 1
+                    continue
+                try:
+                    r = self.import_bundle(kb_id, src["source"], ref=src.get("ref"), subdir=src.get("subdir"))
+                    out["updated"] += 1
+                    out["errors"] += [f"{kb_id}: {f}" for f in r.get("failed", [])]
+                except Exception as exc:
+                    logger.exception("OKF 自动同步失败：知识库 %s", kb_id)
+                    out["errors"].append(f"{kb_id}: {type(exc).__name__}: {exc}"[:300])
+            out["errors"] = out["errors"][:10]
+            self._auto_last = {"at": started.isoformat(), **out}
+            if out["updated"] or out["errors"]:
+                logger.info("OKF 自动同步：检查 %d 个知识库，重新导入 %d 个，错误 %d", out["checked"], out["updated"], len(out["errors"]))
+            return self._auto_last
+        finally:
+            self._sync_lock.release()
 
 
 okf_service = OKFService()
