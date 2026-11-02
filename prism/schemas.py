@@ -238,6 +238,8 @@ class RetrievalTrace(BaseModel):
     metadata_filter: dict[str, Any] = Field(default_factory=dict)
     # 判定库中无答案时，精排靠前但没过阈值的相近主题：{"chunk_id", "doc_id", "label", "snippet", "score"}，给回答层反问用
     near_misses: list[dict[str, Any]] = Field(default_factory=list)
+    # OKF 权威条目命中：{"doc_id", "title", "matched", "type", "owner", "chunks"}，这些条目被置顶（确定性路由，不走向量）
+    okf: list[dict[str, Any]] = Field(default_factory=list)
     timings_ms: dict[str, float] = Field(default_factory=dict)
     notes: list[str] = Field(default_factory=list)
 
@@ -251,6 +253,7 @@ class Context(BaseModel):
     weaved: bool = False
     weaved_entity: str | None = None
     compressed_text: str | None = None
+    authority: str | None = None         # "okf"：OKF 权威条目（问题点名命中，确定性置顶），模型以它为准
 
     def text_for_llm(self) -> str:
         return self.compressed_text if self.compressed_text else self.chunk.text

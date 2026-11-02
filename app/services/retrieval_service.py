@@ -74,7 +74,7 @@ class RetrievalService:
             return {
                 "chunkId": c.chunk_id, "docId": c.doc_id, "fileName": names.get(c.doc_id), "breadcrumb": c.breadcrumb_text, "text": c.text,
                 "compressedText": cx.compressed_text, "score": round(cx.score, 6), "tokenCount": c.token_count, "pageStart": c.page_start, "pageEnd": c.page_end,
-                "matchedChildIds": cx.matched_child_ids, "weaved": cx.weaved, "weavedEntity": cx.weaved_entity,
+                "matchedChildIds": cx.matched_child_ids, "weaved": cx.weaved, "weavedEntity": cx.weaved_entity, "authority": cx.authority,
             }
 
         return {
@@ -92,6 +92,7 @@ class RetrievalService:
             "hops": [h.model_dump() for h in tr.hops],
             "compression": tr.compression,
             "metadataFilter": tr.metadata_filter or None,
+            "okf": tr.okf,
             "timingsMs": {k: round(v, 1) for k, v in tr.timings_ms.items()},
             "funnel": {"recall": sum(len(v) for v in tr.routes.values()), "fused": len(tr.fused), "reranked": len(tr.reranked), "contexts": len(result.contexts)},
         }

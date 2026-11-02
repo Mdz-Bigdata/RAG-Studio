@@ -319,7 +319,7 @@ def context_view(cx: Context, names: dict[str, str]) -> dict[str, Any]:
     return {
         "chunkId": c.chunk_id, "docId": c.doc_id, "fileName": names.get(c.doc_id), "breadcrumb": c.breadcrumb_text, "text": c.text,
         "compressedText": cx.compressed_text, "score": round(cx.score, 6), "tokenCount": c.token_count, "pageStart": c.page_start, "pageEnd": c.page_end,
-        "matchedChildIds": cx.matched_child_ids, "weaved": cx.weaved, "weavedEntity": cx.weaved_entity,
+        "matchedChildIds": cx.matched_child_ids, "weaved": cx.weaved, "weavedEntity": cx.weaved_entity, "authority": cx.authority,
     }
 
 

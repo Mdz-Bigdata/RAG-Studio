@@ -1,6 +1,6 @@
 // 上下文 / 引用来源卡片：编号、文件、面包屑、分数条、压缩前后切换、织入标记。
 import { useState } from 'react';
-import { ChevronDown, ChevronUp, FileText, Network } from 'lucide-react';
+import { BadgeCheck, ChevronDown, ChevronUp, FileText, Network } from 'lucide-react';
 import type { ContextView } from '../api/types';
 import { Badge, ScoreBar } from './ui';
 import { formatScore } from '../lib/format';
@@ -28,13 +28,14 @@ export function ContextCard({ ctx, index, highlighted, defaultExpanded = false, 
           <span className="ellipsis" title={ctx.fileName ?? ctx.docId} style={{ maxWidth: compact ? 140 : 220 }}>{ctx.fileName ?? ctx.docId}</span>
           {pages ? <span className="faint">{pages}</span> : null}
           {ctx.weaved ? <Badge tone="weaved"><Network size={10} />织入：{ctx.weavedEntity}</Badge> : null}
+          {ctx.authority === 'okf' ? <Badge tone="ok" title="OKF 权威条目：问题点名命中，整篇置顶，不经过向量检索"><BadgeCheck size={10} />权威 · OKF</Badge> : null}
         </div>
         <div className="row gap-6">
           <span className="mono">{formatScore(ctx.score)}</span>
           <span className="faint">{ctx.tokenCount} tok</span>
         </div>
       </div>
-      <div style={{ margin: '4px 0 6px' }}><ScoreBar value={ctx.score} color={ctx.weaved ? 'var(--c-weaved)' : undefined} /></div>
+      <div style={{ margin: '4px 0 6px' }}><ScoreBar value={ctx.score} color={ctx.weaved ? 'var(--c-weaved)' : ctx.authority === 'okf' ? 'var(--accent)' : undefined} /></div>
       {ctx.breadcrumb ? <div className="chunk-crumb ellipsis" title={ctx.breadcrumb}>{ctx.breadcrumb}</div> : null}
       <div className={`chunk-text pre ${expanded ? '' : compact ? 'clamp-3' : 'clamp-5'}`} style={{ marginTop: 4 }}>{body}</div>
       <div className="row between mt-8">

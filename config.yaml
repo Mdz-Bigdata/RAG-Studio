@@ -102,6 +102,10 @@ sparse:
 # ---------------------------------------------------------------- 检索（漏斗：50 → 50 → 10 → 5）
 retrieval:
   top_n_per_route: 50         # 每路召回 recall_top_k，50-100
+  okf:                        # OKF 权威条目（Git 管理的 Markdown 知识包，「知识库」页导入）：问题点名条目时置顶该条目，不走向量
+    enabled: true
+    max_pinned: 2             # 一次最多置顶几个条目
+    max_parents: 6            # 每个条目最多带几个段落
   parallel_recall: true       # 多路召回并发执行，耗时不叠加
   sparse_backend: bm25        # 关键词路：bm25（bm25s + jieba）| lancedb_fts（LanceDB 原生全文，需 lancedb 向量后端）
   sql:                        # 混合检索第三路：Excel / CSV → SQLite 表，按字段过滤 / 比较 / 排序

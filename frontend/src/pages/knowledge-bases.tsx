@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, Check, Database, History, FileText, Layers, List as ListIcon, Loader2, Network, Share2, Pencil, Plus, RefreshCw, RotateCw, ScanText, Search, Tags, Trash2, TreePine, Upload, X } from 'lucide-react';
+import { BadgeCheck, AlertCircle, Check, Database, History, FileText, Layers, List as ListIcon, Loader2, Network, Share2, Pencil, Plus, RefreshCw, RotateCw, ScanText, Search, Tags, Trash2, TreePine, Upload, X } from 'lucide-react';
 import { api } from '../api/client';
-import type { ChunkView, Document, EditBackup, EntityRelation, KbGraph, KnowledgeBase, ParsingInfo, PopoStatus } from '../api/types';
+import type { OKFImportResult, OKFStatus, ChunkView, Document, EditBackup, EntityRelation, KbGraph, KnowledgeBase, ParsingInfo, PopoStatus } from '../api/types';
 import { Badge, Button, Callout, Drawer, Empty, Field, Modal, Spinner, Tabs, confirmDialog } from '../components/ui';
 import { EntityGraph } from '../components/entity-graph';
 import { STATUS_LABEL, formatBytes, formatDate } from '../lib/format';
@@ -193,6 +193,49 @@ function Step({ done, children }: { done: boolean; children: React.ReactNode }) 
 const isEdited = (d: Document) => (d.parser ?? '').includes('edited');
 
 /** 人工校对过的文档重新解析：默认保留校对（用校对后的 Markdown 按当前配置重建），或明确放弃校对、回到源文件。 */
+function OKFModal({ kbId, status, onClose, onChanged }: { kbId: string; status: OKFStatus | null; onClose: () => void; onChanged: (s: OKFStatus) => void }) {
+  const { toast } = useApp();
+  const [source, setSource] = useState(status?.source ?? '');
+  const [ref, setRef] = useState(status?.ref ?? '');
+  const [subdir, setSubdir] = useState(status?.subdir ?? '');
+  const [busy, setBusy] = useState<'import' | 'sync' | 'forget' | null>(null);
+  const [result, setResult] = useState<OKFImportResult | null>(null);
+  const run = async (kind: 'import' | 'sync') => {
+    setBusy(kind);
+    try {
+      const r = kind === 'sync' ? await api.okf.sync(kbId) : await api.okf.import(kbId, { source: source.trim(), ref: ref.trim() || undefined, subdir: subdir.trim() || undefined });
+      setResult(r);
+      onChanged(await api.okf.status(kbId));
+      toast(`OKF 同步完成：新增 ${r.created}、更新 ${r.updated}、未变 ${r.unchanged}、删除 ${r.removed}${r.failed.length ? `，${r.failed.length} 条入库失败` : ''}`, r.failed.length ? 'warn' : 'ok');
+    } catch (e) { toast(errMsg(e), 'bad'); } finally { setBusy(null); }
+  };
+  const forget = async () => {
+    if (!confirmDialog('取消关联并删除这些 OKF 条目文档？')) return;
+    setBusy('forget');
+    try { await api.okf.forget(kbId, true); onChanged(await api.okf.status(kbId)); setResult(null); toast('已删除 OKF 条目', 'ok'); } catch (e) { toast(errMsg(e), 'bad'); } finally { setBusy(null); }
+  };
+  return (
+    <Modal title="OKF 知识包" wide onClose={onClose} footer={<>{status?.count ? <Button variant="ghost" loading={busy === 'forget'} disabled={!!busy} onClick={forget}>取消关联并删除条目</Button> : null}<Button onClick={onClose}>关闭</Button>{status?.source ? <Button loading={busy === 'sync'} disabled={!!busy} onClick={() => run('sync')}><RefreshCw size={13} />重新同步</Button> : null}<Button variant="primary" loading={busy === 'import'} disabled={!!busy || !source.trim()} onClick={() => run('import')}>导入</Button></>}>
+      <div className="col gap-12">
+        <Callout>OKF（Open Knowledge Format）：一个目录（通常是 Git 仓库）里的 Markdown 文件，每个文件一个概念——指标公式、API 规范、运维手册——文件头是 YAML front matter（type / title / description / owner / tags / timestamp，可加 aliases 别名）。
+          导入后每个条目是一篇带「OKF」标签的文档；问题点名了条目的标题或别名时，该条目<b>整篇置顶</b>交给模型（确定性，不经过向量检索），其余资料照常走 RAG。知识包改了就「重新同步」：内容没变的条目不动，变了的重新入库，删掉的从知识库删除。</Callout>
+        <Field label="来源" hint="Git 地址（https:// / git@ / .git）或服务器上的目录"><input value={source} onChange={(e) => setSource(e.target.value)} placeholder="https://github.com/your-org/knowledge.git 或 /data/okf-bundle" /></Field>
+        <div className="row gap-12">
+          <Field label="分支 / 标签（可选）"><input value={ref} onChange={(e) => setRef(e.target.value)} placeholder="main" /></Field>
+          <Field label="子目录（可选）"><input value={subdir} onChange={(e) => setSubdir(e.target.value)} placeholder="knowledge/" /></Field>
+        </div>
+        {status?.source ? <div className="xs muted">当前：{status.source}{status.ref ? ` @${status.ref}` : ''}{status.subdir ? ` /${status.subdir}` : ''} · {status.count} 个条目{status.commit ? ` · 提交 ${status.commit.slice(0, 8)}` : ''}{status.syncedAt ? ` · 同步于 ${status.syncedAt.slice(0, 19).replace('T', ' ')}` : ''}</div> : null}
+        {result?.failed.length ? <Callout tone="warn">{result.failed.map((f, i) => <div key={i}>{f}</div>)}</Callout> : null}
+        {status?.entries.length ? (
+          <div className="col gap-4" style={{ maxHeight: 260, overflowY: 'auto' }}>
+            {status.entries.map((e) => <div key={e.docId} className="row gap-8 small"><Badge tone="ok"><BadgeCheck size={10} />{e.type || 'entry'}</Badge><span className="ellipsis">{e.title}</span>{e.owner ? <span className="xs faint">· {e.owner}</span> : null}</div>)}
+          </div>
+        ) : null}
+      </div>
+    </Modal>
+  );
+}
+
 function ReprocessEditedModal({ doc, onClose, onRun }: { doc: Document; onClose: () => void; onRun: (discardEdits: boolean) => Promise<void> }) {
   const [busy, setBusy] = useState<'keep' | 'discard' | null>(null);
   const run = async (discard: boolean) => { setBusy(discard ? 'discard' : 'keep'); try { await onRun(discard); onClose(); } finally { setBusy(null); } };
@@ -399,6 +442,8 @@ export function KnowledgeBasesPage() {
   const [metaDoc, setMetaDoc] = useState<Document | null>(null);
   const [popoDoc, setPopoDoc] = useState<Document | null>(null);
   const [backupDoc, setBackupDoc] = useState<Document | null>(null);
+  const [okfOpen, setOkfOpen] = useState(false);
+  const [okf, setOkf] = useState<OKFStatus | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const kbId = currentKb?.id ?? null;
 
@@ -426,6 +471,7 @@ export function KnowledgeBasesPage() {
     setGraph(null);
   }, [kbId]);
   useEffect(() => { if (kbId) loadDocs(kbId); }, [kbId, loadDocs]);
+  useEffect(() => { setOkf(null); if (kbId) api.okf.status(kbId).then(setOkf).catch(() => setOkf(null)); }, [kbId]);
   useEffect(() => {
     if (!kbId || tab !== 'entities') return;
     api.kb.entities(kbId).then(setEntities).catch(() => setEntities([]));
@@ -566,6 +612,7 @@ export function KnowledgeBasesPage() {
                     {q ? <Button type="button" size="xs" variant="ghost" onClick={() => { setQInput(''); setQ(''); setPage(0); }}>清除</Button> : null}
                   </form>
                 ) : null}
+                <Button size="sm" onClick={() => setOkfOpen(true)} title="导入 OKF（开放知识格式）知识包：Git 仓库 / 目录里带 front matter 的 Markdown，问题点名条目时整篇置顶"><BadgeCheck size={13} />OKF 知识包{okf?.count ? `（${okf.count}）` : ''}</Button>
                 <Button size="sm" onClick={reindex} title="按当前解析 / 切片 / 向量配置重建整库索引"><RefreshCw size={13} />重建索引</Button>
                 <Button size="sm" variant="ghost" icon onClick={() => kbId && loadDocs(kbId)}><RefreshCw size={13} /></Button>
               </div>
@@ -608,7 +655,7 @@ export function KnowledgeBasesPage() {
                               {d.allowedDepartments?.length ? <Badge title="仅这些部门可见">限 {d.allowedDepartments.join('、')}</Badge> : null}
                               {d.validFrom || d.validTo ? <span className="mono">{d.validFrom ?? '…'} ~ {d.validTo ?? '…'}</span> : null}
                               <span>更新于 {formatDate(d.updatedAt)}</span>
-                              {d.tags.filter((t) => t !== '已过期').map((t) => <Badge key={t}>{t}</Badge>)}
+                              {d.tags.filter((t) => t !== '已过期').map((t) => (t === 'OKF' ? <Badge key={t} tone="ok" title="OKF 权威条目：问题点名时整篇置顶"><BadgeCheck size={10} />OKF</Badge> : <Badge key={t}>{t}</Badge>))}
                             </div>
                             {d.errorMessage ? <div className="xs text-danger mt-4">{d.errorMessage}</div> : null}
                           </div>
@@ -675,6 +722,7 @@ export function KnowledgeBasesPage() {
       {popoDoc ? <PopoModal doc={popoDoc} onClose={() => setPopoDoc(null)} onReprocess={replaceDoc} /> : null}
       {backupDoc ? <EditBackupsModal doc={backupDoc} onClose={() => setBackupDoc(null)} onRestored={replaceDoc} /> : null}
       {reprocessDoc ? <ReprocessEditedModal doc={reprocessDoc} onClose={() => setReprocessDoc(null)} onRun={(discard) => runReprocess(reprocessDoc, discard)} /> : null}
+      {okfOpen && kbId ? <OKFModal kbId={kbId} status={okf} onClose={() => setOkfOpen(false)} onChanged={(s) => { setOkf(s); if (kbId) loadDocs(kbId, true); refreshKbs().catch(() => undefined); }} /> : null}
       {metaDoc ? <MetaModal doc={metaDoc} onClose={() => setMetaDoc(null)} onSaved={(d) => { replaceDoc(d); if (kbId) setTimeout(() => loadDocs(kbId, true), 600); }} /> : null}
     </div>
   );

@@ -147,6 +147,8 @@ const GROUPS: { title: string; icon: React.ReactNode; tone: string; note?: strin
       { path: 'retrieval.fusion.weight_sparse', label: 'BM25 权重', type: 'num', min: 0, max: 5, step: 0.1 },
       { path: 'retrieval.fusion.convex_alpha', label: '凸组合 α', type: 'num', min: 0, max: 1, step: 0.05, hint: '技术文档 0.6-0.7；FAQ / 合同 0.4-0.5' },
       { path: 'retrieval.parallel_recall', label: '多路并发召回', type: 'bool' },
+      { path: 'retrieval.okf.enabled', label: 'OKF 权威条目置顶', type: 'bool', hint: '问题点名了 OKF 条目（标题 / 别名）时，整篇置顶交给模型，不经过向量和精排；其余资料照常 RAG' },
+      { path: 'retrieval.okf.max_pinned', label: 'OKF 一次最多置顶', type: 'num', min: 1, max: 5 },
       { path: 'retrieval.sparse_backend', label: '关键词路实现', type: 'select', options: [['bm25', 'bm25s + jieba（内存）'], ['lancedb_fts', 'LanceDB 原生全文（磁盘）']], hint: 'LanceDB 全文需要向量库后端为 LanceDB；分词方式见「向量索引」里的 LanceDB 全文分词' },
       { path: 'retrieval.sql.enabled', label: 'SQL 结构化检索（第三路）', type: 'bool' },
       { path: 'retrieval.sql.text_to_sql', label: 'text-to-SQL（LLM）', type: 'bool' },

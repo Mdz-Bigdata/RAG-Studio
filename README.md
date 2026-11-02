@@ -16,6 +16,8 @@
 
 千万级知识库：[SQLite 块存储 + LanceDB jieba 全文索引 + 文档级过滤下推，批量导入与压测（1000 万段落带过滤检索 p50 72 ms）](docs/SCALING.md)。
 
+OKF 权威知识包：[Git 管理的 Markdown 条目（指标公式 / API 规范 / 运维手册），问题点名条目时整篇置顶、不经过向量，其余走 RAG](docs/OKF.md)。
+
 ## 快速开始
 
 ```bash

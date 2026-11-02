@@ -19,6 +19,28 @@ export interface KnowledgeBase {
 export type DocStatus = 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'FAILED';
 
 /** 文档分页：total 是符合搜索条件的总数，processing 是整库正在解析 / 排队的数（轮询用）。 */
+/** OKF 知识包状态：来源、提交、条目清单。 */
+export interface OKFStatus {
+  source: string | null;
+  ref: string | null;
+  subdir: string | null;
+  commit: string | null;
+  syncedAt: string | null;
+  count: number;
+  isGit: boolean;
+  entries: { docId: string; sha1: string; title: string; type: string; owner: string }[];
+}
+
+export interface OKFImportResult {
+  created: number;
+  updated: number;
+  unchanged: number;
+  removed: number;
+  total: number;
+  commit: string | null;
+  failed: string[];
+}
+
 export interface DocumentPage {
   items: Document[];
   total: number;
@@ -139,6 +161,7 @@ export interface ContextView {
   matchedChildIds: string[];
   weaved: boolean;
   weavedEntity: string | null;
+  authority?: string | null;       // "okf"：OKF 权威条目，问题点名命中后置顶
 }
 
 export interface WeavedRelation {
@@ -172,6 +195,7 @@ export interface RetrievalResponse {
   hops: HopTrace[];
   compression: { mode?: string; tokens_before?: number; tokens_after?: number };
   metadataFilter?: MetadataFilterInfo | null;
+  okf?: { doc_id: string; title: string; matched: string; type: string; owner: string; chunks: number }[];   // 命中并置顶的 OKF 权威条目
   timingsMs: Record<string, number>;
   funnel: { recall: number; fused: number; reranked: number; contexts: number };
 }

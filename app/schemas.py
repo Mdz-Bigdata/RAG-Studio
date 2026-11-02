@@ -164,6 +164,7 @@ class ContextView(BaseModel):
     matchedChildIds: list[str]
     weaved: bool
     weavedEntity: str | None
+    authority: str | None = None     # "okf"：OKF 权威条目（问题点名命中，确定性置顶）
 
 
 class RetrievalResponse(BaseModel):
@@ -181,6 +182,7 @@ class RetrievalResponse(BaseModel):
     hops: list[dict[str, Any]]
     compression: dict[str, Any]
     metadataFilter: dict[str, Any] | None = None   # 自查询识别出的元数据条件及是否生效
+    okf: list[dict[str, Any]] = Field(default_factory=list)   # 命中并置顶的 OKF 权威条目
     timingsMs: dict[str, float]
     funnel: dict[str, int]
 

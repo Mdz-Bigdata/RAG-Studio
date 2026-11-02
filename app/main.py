@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .api import agents_router, chat_router, corpus_router, documents_router, eval_router, feishu_router, kb_router, lake_router, lance_router, memory_router, models_router, multimodal_router, recommend_router, retrieval_router, settings_router, system_router
+from .api import agents_router, chat_router, corpus_router, documents_router, eval_router, feishu_router, kb_router, lake_router, lance_router, memory_router, models_router, multimodal_router, okf_router, recommend_router, retrieval_router, settings_router, system_router
 from .config import app_config
 from .db import init_db
 
@@ -70,6 +70,7 @@ app.include_router(recommend_router, prefix=f"{p}/recommend", tags=["Recommend"]
 app.include_router(agents_router, prefix=f"{p}/agents", tags=["Agents"])
 app.include_router(lake_router, prefix=f"{p}/lake", tags=["AgentLake"])
 app.include_router(feishu_router, prefix=f"{p}/feishu", tags=["Feishu"])
+app.include_router(okf_router, prefix=f"{p}/okf", tags=["OKF"])
 
 
 @app.get(f"{p}/health")

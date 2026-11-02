@@ -358,8 +358,18 @@ class MetadataFilterConfig(BaseModel):
     fallback: bool = True                # 按识别出的条件没有检索结果时，去掉条件重查一次
 
 
+class OKFConfig(BaseModel):
+    """OKF（开放知识格式）权威条目：问题点名了条目的标题 / 别名时，直接把该条目置顶交给模型（确定性，不走向量），
+    其余资料照常走 RAG 召回。条目来自导入的 OKF 知识包（Git 仓库 / 目录里带 front matter 的 Markdown）。"""
+
+    enabled: bool = True
+    max_pinned: int = 2                  # 一次最多置顶几个条目
+    max_parents: int = 6                 # 每个条目最多带几个段落（条目通常很短，整篇都给）
+
+
 class RetrievalConfig(BaseModel):
     top_n_per_route: int = 50
+    okf: OKFConfig = OKFConfig()
     metadata_filter: MetadataFilterConfig = MetadataFilterConfig()
     summary: SummaryRouteConfig = SummaryRouteConfig()
     hierarchy: HierarchyConfig = HierarchyConfig()

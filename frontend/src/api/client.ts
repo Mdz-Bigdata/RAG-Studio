@@ -1,5 +1,5 @@
 // 后端 API 客户端。开发态通过 Vite 代理 `/api` → FastAPI（VITE_API_TARGET，默认 http://localhost:8000）；生产态由 FastAPI 静态托管。
-import type { AliasSuggestion, AugmentState, FaqStatus, HealthReport, MetaField, MetaRow, MineruConnectionTest, ChatMessage, ChatPlan, ChatSession, ChatSource, ChunkView, CoverageReport, Document, DocumentPage, EntityRelation, EvalExample, EvalReport, ImageHitView, ImageView, KnowledgeBase, MultimodalEvalReport, MineruTiersInfo, ModelConfig, MultimodalMode, MultimodalResponse, MultimodalStatus, SimilarResponse, DuplicatesResponse, ParsingInfo, PopoStatus, EditBackup, PresetsPayload, ProviderPreset, RetrievalMode, RetrievalOverrides, RetrievalResponse, RouteResult, RuntimeInfo, SettingsPayload, SystemStatus, WeavedRelation, ReindexStatus, UserIdentity, VectorBenchmark, KbGraph } from './types';
+import type { AliasSuggestion, AugmentState, FaqStatus, HealthReport, MetaField, MetaRow, MineruConnectionTest, ChatMessage, ChatPlan, ChatSession, ChatSource, ChunkView, CoverageReport, Document, DocumentPage, OKFImportResult, OKFStatus, EntityRelation, EvalExample, EvalReport, ImageHitView, ImageView, KnowledgeBase, MultimodalEvalReport, MineruTiersInfo, ModelConfig, MultimodalMode, MultimodalResponse, MultimodalStatus, SimilarResponse, DuplicatesResponse, ParsingInfo, PopoStatus, EditBackup, PresetsPayload, ProviderPreset, RetrievalMode, RetrievalOverrides, RetrievalResponse, RouteResult, RuntimeInfo, SettingsPayload, SystemStatus, WeavedRelation, ReindexStatus, UserIdentity, VectorBenchmark, KbGraph } from './types';
 import type { HardNegativeMiningConfig, HardNegativeReport, MetadataFacets } from './types';
 
 export const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? '/api/v1';
@@ -52,6 +52,13 @@ export const api = {
     entities: (id: string) => request<EntityRelation[]>(`/knowledge-bases/${id}/entities`),
     graph: (id: string, depth = 2) => request<KbGraph>(`/knowledge-bases/${id}/graph?depth=${depth}`),
     reindex: (id: string) => request<{ message: string }>(`/knowledge-bases/${id}/reindex`, { method: 'POST' }),
+  },
+  okf: {
+    status: (kbId: string) => request<OKFStatus>(`/okf/${kbId}`),
+    import: (kbId: string, body: { source: string; ref?: string; subdir?: string }) => request<OKFImportResult>(`/okf/${kbId}/import`, json(body)),
+    sync: (kbId: string) => request<OKFImportResult>(`/okf/${kbId}/sync`, { method: 'POST' }),
+    match: (kbId: string, q: string) => request<{ doc_id: string; title: string; matched: string; type: string; owner: string }[]>(`/okf/${kbId}/match?q=${encodeURIComponent(q)}`),
+    forget: (kbId: string, deleteDocs = true) => request<{ removed: number }>(`/okf/${kbId}?deleteDocs=${deleteDocs}`, { method: 'DELETE' }),
   },
   documents: {
     supportedFormats: () => request<{ extensions: string[]; mineru: boolean }>('/documents/supported-formats'),
